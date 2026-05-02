@@ -1,4 +1,3 @@
---!native
 --!optimize 2
 
 ---- types ----
@@ -23,9 +22,10 @@ export type ConfigEntry = {
 }
 
 type Entry = {
-    part       : BasePart,  
-    box_offset : vector,   
-    box_half   : vector,    
+    inst       : Instance,
+    part       : BasePart,
+    box_offset : vector,
+    box_half   : vector,
     config     : ConfigEntry,
     box        : any?,
     label      : any?,
@@ -49,7 +49,6 @@ type ObjMeta = { parent: Instance, name: string }
 local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
 local Workspace   = game:GetService("Workspace")
-local Camera      = Workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 
 ---- constants ----
@@ -57,13 +56,14 @@ local INF        = math.huge
 local EMPTY_LIST : { string } = table.freeze({})
 
 ---- variables ----
-local CONFIGS           : { [string]: ConfigEntry }  = {}
-local entries           : { Entry }                  = {}
-local known             : { [BasePart]: true }        = {}
-local config_count      : { [ConfigEntry]: number }  = {}
-local obj_meta          : { [ConfigEntry]: ObjMeta } = {}
+local CONFIGS        : { [string]: ConfigEntry }  = {}
+local entries        : { Entry }                  = {}
+local known          : { [BasePart]: true }        = setmetatable({}, { __mode = "k" }) :: any
+local known_children : { [Instance]: true }        = setmetatable({}, { __mode = "k" }) :: any
+local config_count   : { [ConfigEntry]: number }  = {}
+local obj_meta       : { [ConfigEntry]: ObjMeta } = {}
 
----- functions ----
+---- fastcalls ----
 local v_mag      = vector.magnitude
 local v_min      = vector.min
 local v_max      = vector.max
@@ -73,7 +73,6 @@ local math_round = math.round
 local vec2_new   = Vector2.new
 local vc         = vector.create
 local t_find     = table.find
-local t_insert   = table.insert
 
 local function is_list_active(list: { string }): boolean
     for _, v in list do
@@ -92,13 +91,15 @@ local function should_draw(name: string, inc: { string }?, exc: { string }?): bo
     return true
 end
 
+@native
 local function project_corner(
+    cam: any,
     corner: vector,
     min_x: number, min_y: number,
     max_x: number, max_y: number,
     found: boolean
 ): (number, number, number, number, boolean)
-    local s, v = Camera:WorldToScreenPoint(corner)
+    local s, v = cam:WorldToScreenPoint(corner)
     if v then
         local sx, sy = s.X, s.Y
         return math_min(min_x, sx), math_min(min_y, sy),
@@ -116,10 +117,9 @@ local function resolve(obj: Instance): (BasePart?, string, { BasePart })
     local name  = obj.Name
     local parts : { BasePart } = {}
 
-    -- collect every BasePart in the subtree
     for _, desc in obj:GetDescendants() do
         if desc:IsA("BasePart") then
-            t_insert(parts, desc :: BasePart)
+            parts[#parts + 1] = desc :: BasePart
         end
     end
 
@@ -142,9 +142,10 @@ local function resolve(obj: Instance): (BasePart?, string, { BasePart })
     return primary, name, parts
 end
 
-local function make_entry(part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
+local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
     if known[part] then return end
-    known[part] = true
+    known[part]          = true
+    known_children[inst] = true
     config_count[config] = (config_count[config] or 0) + 1
 
     local wmin = vc( INF,  INF,  INF)
@@ -190,7 +191,8 @@ local function make_entry(part: BasePart, parts: { BasePart }, config: ConfigEnt
         dist_label.Text    = "0m"
     end
 
-    table.insert(entries, {
+    entries[#entries + 1] = {
+        inst       = inst,
         part       = part,
         box_offset = box_offset,
         box_half   = box_half,
@@ -207,14 +209,15 @@ local function make_entry(part: BasePart, parts: { BasePart }, config: ConfigEnt
         s_max_x    = 0, s_max_y = 0,
         pos_dirty  = false,
         text_dirty = false,
-    })
+    }
 end
 
 local function remove_entry(i: number): ()
     local entry  = entries[i]
     local config = entry.config
-    known[entry.part]     = nil
-    config_count[config]  = (config_count[config] or 1) - 1
+    known[entry.part]          = nil
+    known_children[entry.inst] = nil
+    config_count[config]       = (config_count[config] or 1) - 1
     if entry.box        then entry.box:Remove()        end
     if entry.label      then entry.label:Remove()      end
     if entry.dist_label then entry.dist_label:Remove() end
@@ -239,10 +242,11 @@ local function scan(): ()
             local inc = config.IncludeOnly
             local exc = config.ExcludeObject
             for _, child in config.Folder:GetChildren() do
+                if known_children[child] then continue end
                 if should_draw(child.Name, inc, exc) then
                     local part, obj_name, parts = resolve(child)
                     if part then
-                        make_entry(part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
+                        make_entry(child, part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
                     end
                 end
             end
@@ -256,10 +260,10 @@ local function scan(): ()
 
             if config.MultiSameObject then
                 for _, child in parent:GetChildren() do
-                    if child.Name == meta.name then
+                    if child.Name == meta.name and not known_children[child] then
                         local part, obj_name, parts = resolve(child)
                         if part then
-                            make_entry(part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
+                            make_entry(child, part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
                         end
                     end
                 end
@@ -269,7 +273,7 @@ local function scan(): ()
                         if child.Name == meta.name then
                             local part, obj_name, parts = resolve(child)
                             if part then
-                                make_entry(part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
+                                make_entry(child, part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
                                 break
                             end
                         end
@@ -280,7 +284,11 @@ local function scan(): ()
     end
 end
 
+@native
 local function on_pre_local(): ()
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+
     local char = LocalPlayer.Character
     local hrp  = char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
     local lpos : vector? = if hrp then hrp.Position :: vector else nil
@@ -310,22 +318,22 @@ local function on_pre_local(): ()
                     end
                 end
 
-                local center       = pos + entry.box_offset
-                local hs           = entry.box_half
-                local hx, hy, hz   = hs.x, hs.y, hs.z
+                local center     = pos + entry.box_offset
+                local hs         = entry.box_half
+                local hx, hy, hz = hs.x, hs.y, hs.z
 
                 local min_x, min_y =  INF,  INF
                 local max_x, max_y = -INF, -INF
                 local found        = false
 
-                min_x, min_y, max_x, max_y, found = project_corner(center + vc( hx,  hy,  hz), min_x, min_y, max_x, max_y, found)
-                min_x, min_y, max_x, max_y, found = project_corner(center + vc(-hx,  hy,  hz), min_x, min_y, max_x, max_y, found)
-                min_x, min_y, max_x, max_y, found = project_corner(center + vc( hx, -hy,  hz), min_x, min_y, max_x, max_y, found)
-                min_x, min_y, max_x, max_y, found = project_corner(center + vc(-hx, -hy,  hz), min_x, min_y, max_x, max_y, found)
-                min_x, min_y, max_x, max_y, found = project_corner(center + vc( hx,  hy, -hz), min_x, min_y, max_x, max_y, found)
-                min_x, min_y, max_x, max_y, found = project_corner(center + vc(-hx,  hy, -hz), min_x, min_y, max_x, max_y, found)
-                min_x, min_y, max_x, max_y, found = project_corner(center + vc( hx, -hy, -hz), min_x, min_y, max_x, max_y, found)
-                min_x, min_y, max_x, max_y, found = project_corner(center + vc(-hx, -hy, -hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc( hx,  hy,  hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc(-hx,  hy,  hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc( hx, -hy,  hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc(-hx, -hy,  hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc( hx,  hy, -hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc(-hx,  hy, -hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc( hx, -hy, -hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc(-hx, -hy, -hz), min_x, min_y, max_x, max_y, found)
 
                 if found then
                     if  min_x ~= entry.s_min_x or min_y ~= entry.s_min_y
@@ -346,6 +354,7 @@ local function on_pre_local(): ()
     end
 end
 
+@native
 local function on_render(): ()
     for _, entry in entries do
         local vis = entry.visible
@@ -392,7 +401,7 @@ return function(configs: { [string]: ConfigEntry }): ()
     CONFIGS = configs
 
     for _, config in configs do
-    if config.Enabled and config.Object then
+        if config.Enabled and config.Object then
             obj_meta[config] = {
                 parent = config.Object.Parent :: Instance,
                 name   = config.Object.Name,
