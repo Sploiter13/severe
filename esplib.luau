@@ -1,3 +1,4 @@
+--!strict
 --!optimize 2
 
 ---- types ----
@@ -43,7 +44,7 @@ type Entry = {
     text_dirty : boolean,
 }
 
-type ObjMeta = { parent: Instance, name: string }
+type ObjMeta = { parent: Instance?, name: string }
 
 ---- environment ----
 local RunService  = game:GetService("RunService")
@@ -52,16 +53,16 @@ local Workspace   = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
 
 ---- constants ----
-local INF        = math.huge
-local EMPTY_LIST : { string } = table.freeze({})
+local INF     = math.huge
+local WEAK_MT = table.freeze({ __mode = "k" })
 
 ---- variables ----
-local CONFIGS        : { [string]: ConfigEntry }  = {}
-local entries        : { Entry }                  = {}
-local known          : { [BasePart]: true }        = setmetatable({}, { __mode = "k" }) :: any
-local known_children : { [Instance]: true }        = setmetatable({}, { __mode = "k" }) :: any
-local config_count   : { [ConfigEntry]: number }  = {}
-local obj_meta       : { [ConfigEntry]: ObjMeta } = {}
+local CONFIGS        : { [string]: ConfigEntry }   = {}
+local entries        : { Entry }                   = {}
+local known          : { [BasePart]: true? }        = setmetatable({}, WEAK_MT) :: any
+local known_children : { [Instance]: true? }        = setmetatable({}, WEAK_MT) :: any
+local config_count   : { [ConfigEntry]: number? }  = {}
+local obj_meta       : { [ConfigEntry]: ObjMeta? } = {}
 
 ---- fastcalls ----
 local v_mag      = vector.magnitude
@@ -82,10 +83,10 @@ local function is_list_active(list: { string }): boolean
 end
 
 local function should_draw(name: string, inc: { string }?, exc: { string }?): boolean
-    if inc and is_list_active(inc) then
+    if inc ~= nil and is_list_active(inc) then
         return t_find(inc, name) ~= nil
     end
-    if exc and is_list_active(exc) then
+    if exc ~= nil and is_list_active(exc) then
         return t_find(exc, name) == nil
     end
     return true
@@ -128,14 +129,14 @@ local function resolve(obj: Instance): (BasePart?, string, { BasePart })
     local primary: BasePart? = nil
     if cn == "Tool" or cn == "Accessory" then
         local handle = obj:FindFirstChild("Handle")
-        if handle and handle:IsA("BasePart") then
+        if handle ~= nil and handle:IsA("BasePart") then
             primary = handle :: BasePart
         end
     end
-    if not primary and (cn == "Model" or cn == "Tool" or cn == "Accessory") then
+    if primary == nil and (cn == "Model" or cn == "Tool" or cn == "Accessory") then
         primary = (obj :: Model).PrimaryPart
     end
-    if not primary then
+    if primary == nil then
         primary = parts[1]
     end
 
@@ -143,7 +144,7 @@ local function resolve(obj: Instance): (BasePart?, string, { BasePart })
 end
 
 local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
-    if known[part] then return end
+    if known[part] ~= nil then return end
     known[part]          = true
     known_children[inst] = true
     config_count[config] = (config_count[config] or 0) + 1
@@ -218,9 +219,9 @@ local function remove_entry(i: number): ()
     known[entry.part]          = nil
     known_children[entry.inst] = nil
     config_count[config]       = (config_count[config] or 1) - 1
-    if entry.box        then entry.box:Remove()        end
-    if entry.label      then entry.label:Remove()      end
-    if entry.dist_label then entry.dist_label:Remove() end
+    if entry.box ~= nil        then entry.box:Remove()        end
+    if entry.label ~= nil      then entry.label:Remove()      end
+    if entry.dist_label ~= nil then entry.dist_label:Remove() end
     entries[i]        = entries[#entries]
     entries[#entries] = nil
 end
@@ -238,31 +239,31 @@ local function scan(): ()
     for _, config in CONFIGS do
         if not config.Enabled then continue end
 
-        if config.Folder and config.Folder.Parent ~= nil then
+        if config.Folder ~= nil and config.Folder.Parent ~= nil then
             local inc = config.IncludeOnly
             local exc = config.ExcludeObject
             for _, child in config.Folder:GetChildren() do
-                if known_children[child] then continue end
+                if known_children[child] ~= nil then continue end
                 if should_draw(child.Name, inc, exc) then
                     local part, obj_name, parts = resolve(child)
-                    if part then
+                    if part ~= nil then
                         make_entry(child, part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
                     end
                 end
             end
 
-        elseif config.Object then
+        elseif config.Object ~= nil then
             local meta = obj_meta[config]
-            if not meta then continue end
+            if meta == nil then continue end
 
             local parent = meta.parent
-            if not parent or parent.Parent == nil then continue end
+            if parent == nil or parent.Parent == nil then continue end
 
-            if config.MultiSameObject then
+            if config.MultiSameObject == true then
                 for _, child in parent:GetChildren() do
-                    if child.Name == meta.name and not known_children[child] then
+                    if child.Name == meta.name and known_children[child] == nil then
                         local part, obj_name, parts = resolve(child)
-                        if part then
+                        if part ~= nil then
                             make_entry(child, part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
                         end
                     end
@@ -272,7 +273,7 @@ local function scan(): ()
                     for _, child in parent:GetChildren() do
                         if child.Name == meta.name then
                             local part, obj_name, parts = resolve(child)
-                            if part then
+                            if part ~= nil then
                                 make_entry(child, part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
                                 break
                             end
@@ -287,11 +288,11 @@ end
 @native
 local function on_pre_local(): ()
     local cam = Workspace.CurrentCamera
-    if not cam then return end
+    if cam == nil then return end
 
-    local char = LocalPlayer.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
-    local lpos : vector? = if hrp then hrp.Position :: vector else nil
+    local char: Instance?  = LocalPlayer.Character
+    local hrp: BasePart?   = if char ~= nil then char:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
+    local lpos: vector?    = if hrp ~= nil  then hrp.Position :: vector else nil
 
     for _, entry in entries do
         if not entry.config.Enabled then
@@ -303,7 +304,7 @@ local function on_pre_local(): ()
         local pos  = part.Position :: vector
         local vis  = false
 
-        if lpos then
+        if lpos ~= nil then
             local dist = v_mag(pos - lpos)
             if dist <= entry.config.MaxDistance then
                 entry.distance = dist
@@ -361,9 +362,9 @@ local function on_render(): ()
 
         if vis ~= entry.prev_vis then
             entry.prev_vis = vis
-            if entry.box        then entry.box.Visible        = vis end
-            if entry.label      then entry.label.Visible      = vis end
-            if entry.dist_label then entry.dist_label.Visible = vis end
+            if entry.box ~= nil        then entry.box.Visible        = vis end
+            if entry.label ~= nil      then entry.label.Visible      = vis end
+            if entry.dist_label ~= nil then entry.dist_label.Visible = vis end
         end
 
         if vis then
@@ -374,19 +375,19 @@ local function on_render(): ()
                 local mid_x        = (min_x + max_x) * 0.5
                 local fs           = entry.config.FontSize
 
-                if entry.box then
+                if entry.box ~= nil then
                     entry.box.Position = vec2_new(min_x, min_y)
                     entry.box.Size     = vec2_new(max_x - min_x, max_y - min_y)
                 end
-                if entry.label then
+                if entry.label ~= nil then
                     entry.label.Position = vec2_new(mid_x, min_y - fs - 2)
                 end
-                if entry.dist_label then
+                if entry.dist_label ~= nil then
                     entry.dist_label.Position = vec2_new(mid_x, max_y + 4)
                 end
             end
 
-            if entry.text_dirty and entry.dist_label then
+            if entry.text_dirty and entry.dist_label ~= nil then
                 entry.text_dirty      = false
                 entry.dist_label.Text = entry.dist_str
             end
@@ -395,15 +396,15 @@ local function on_render(): ()
 end
 
 ---- exports ----
-return function(configs: { [string]: ConfigEntry }): ()
+local function init(configs: { [string]: ConfigEntry }): ()
     for _, c in configs do table.freeze(c) end
     table.freeze(configs)
     CONFIGS = configs
 
     for _, config in configs do
-        if config.Enabled and config.Object then
+        if config.Enabled and config.Object ~= nil then
             obj_meta[config] = {
-                parent = config.Object.Parent :: Instance,
+                parent = config.Object.Parent,
                 name   = config.Object.Name,
             }
         end
@@ -415,3 +416,5 @@ return function(configs: { [string]: ConfigEntry }): ()
     RunService.PreLocal:Connect(on_pre_local)
     RunService.Render:Connect(on_render)
 end
+
+return init
