@@ -4,6 +4,7 @@
 ---- types ----
 export type ConfigEntry = {
     Enabled         : boolean,
+    DrawMode        : number?,
     BoxColor        : Color3,
     TextColor       : Color3,
     MaxDistance     : number,
@@ -22,7 +23,7 @@ export type ConfigEntry = {
     ExcludeObject   : { string }?,
 }
 
-type Entry = {
+type StaticEntry = {
     inst       : Instance,
     part       : BasePart,
     box_offset : vector,
@@ -44,6 +45,39 @@ type Entry = {
     text_dirty : boolean,
 }
 
+type ImmediateEntry = {
+    inst       : Instance,
+    part       : BasePart,
+    box_offset : vector,
+    box_half   : vector,
+    config     : ConfigEntry,
+    display    : string,
+    visible    : boolean,
+    distance   : number,
+    dist_floor : number,
+    dist_str   : string,
+    s_min_x    : number,
+    s_min_y    : number,
+    s_max_x    : number,
+    s_max_y    : number,
+}
+
+type DynamicEntry = {
+    inst       : Instance,
+    part       : BasePart,
+    config     : ConfigEntry,
+    point      : any,
+    cluster    : any,
+    box        : any?,
+    label      : any?,
+    dist_label : any?,
+    visible    : boolean,
+    prev_vis   : boolean,
+    distance   : number,
+    dist_floor : number,
+    dist_str   : string,
+}
+
 type ObjMeta = { parent: Instance?, name: string }
 
 ---- environment ----
@@ -56,13 +90,21 @@ local LocalPlayer = Players.LocalPlayer
 local INF     = math.huge
 local WEAK_MT = table.freeze({ __mode = "k" })
 
+local BOX_SIZE      = UDim2.fromScale(1, 1)
+local LABEL_SIZE    = UDim2.fromScale(1, 1)
+local ANCHOR_CENTER = Vector2.new(0.5, 0.5)
+local ANCHOR_TOP    = Vector2.new(0.5, 1)
+local ANCHOR_BOTTOM = Vector2.new(0.5, 0)
+
 ---- variables ----
-local CONFIGS        : { [string]: ConfigEntry }   = {}
-local entries        : { Entry }                   = {}
-local known          : { [BasePart]: true? }        = setmetatable({}, WEAK_MT) :: any
-local known_children : { [Instance]: true? }        = setmetatable({}, WEAK_MT) :: any
-local config_count   : { [ConfigEntry]: number? }  = {}
-local obj_meta       : { [ConfigEntry]: ObjMeta? } = {}
+local CONFIGS           : { [string]: ConfigEntry }   = {}
+local static_entries    : { StaticEntry }             = {}
+local immediate_entries : { ImmediateEntry }          = {}
+local dynamic_entries   : { DynamicEntry }            = {}
+local known             : { [BasePart]: true? }       = setmetatable({}, WEAK_MT) :: any
+local known_children    : { [Instance]: true? }       = setmetatable({}, WEAK_MT) :: any
+local config_count      : { [ConfigEntry]: number? }  = {}
+local obj_meta          : { [ConfigEntry]: ObjMeta? } = {}
 
 ---- fastcalls ----
 local v_mag      = vector.magnitude
@@ -74,6 +116,13 @@ local math_round = math.round
 local vec2_new   = Vector2.new
 local vc         = vector.create
 local t_find     = table.find
+
+local Drawing_new    = Drawing.new
+local Drawing_attach = Drawing.attach
+local PI_new         = PointInstance.new
+local PM_new         = PointModel.new
+local DI_Rect        = DrawingImmediate.Rectangle
+local DI_OText       = DrawingImmediate.OutlinedText
 
 local function is_list_active(list: { string }): boolean
     for _, v in list do
@@ -143,12 +192,7 @@ local function resolve(obj: Instance): (BasePart?, string, { BasePart })
     return primary, name, parts
 end
 
-local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
-    if known[part] ~= nil then return end
-    known[part]          = true
-    known_children[inst] = true
-    config_count[config] = (config_count[config] or 0) + 1
-
+local function compute_bbox(parts: { BasePart }, anchor_pos: vector): (vector, vector)
     local wmin = vc( INF,  INF,  INF)
     local wmax = vc(-INF, -INF, -INF)
     for _, p in parts do
@@ -157,13 +201,16 @@ local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, c
         wmin = v_min(wmin, pp - ph)
         wmax = v_max(wmax, pp + ph)
     end
-    local world_center = (wmin + wmax) * 0.5
-    local box_offset   = world_center - (part.Position :: vector)
-    local box_half     = (wmax - wmin) * 0.5
+    local center = (wmin + wmax) * 0.5
+    return center - anchor_pos, (wmax - wmin) * 0.5
+end
+
+local function make_static_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
+    local box_offset, box_half = compute_bbox(parts, part.Position :: vector)
 
     local box: any? = nil
     if config.Box then
-        box           = Drawing.new("Square")
+        box           = Drawing_new("Square")
         box.Visible   = false
         box.Filled    = false
         box.Color     = config.BoxColor
@@ -172,7 +219,7 @@ local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, c
 
     local label: any? = nil
     if config.Name then
-        label         = Drawing.new("Text")
+        label         = Drawing_new("Text")
         label.Visible = false
         label.Color   = config.TextColor
         label.Size    = config.FontSize
@@ -183,7 +230,7 @@ local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, c
 
     local dist_label: any? = nil
     if config.Distance then
-        dist_label         = Drawing.new("Text")
+        dist_label         = Drawing_new("Text")
         dist_label.Visible = false
         dist_label.Color   = config.TextColor
         dist_label.Size    = config.FontSize
@@ -192,7 +239,7 @@ local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, c
         dist_label.Text    = "0m"
     end
 
-    entries[#entries + 1] = {
+    static_entries[#static_entries + 1] = {
         inst       = inst,
         part       = part,
         box_offset = box_offset,
@@ -213,8 +260,108 @@ local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, c
     }
 end
 
-local function remove_entry(i: number): ()
-    local entry  = entries[i]
+local function make_immediate_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
+    local box_offset, box_half = compute_bbox(parts, part.Position :: vector)
+
+    immediate_entries[#immediate_entries + 1] = {
+        inst       = inst,
+        part       = part,
+        box_offset = box_offset,
+        box_half   = box_half,
+        config     = config,
+        display    = display,
+        visible    = false,
+        distance   = 0,
+        dist_floor = -1,
+        dist_str   = "0m",
+        s_min_x    = 0, s_min_y = 0,
+        s_max_x    = 0, s_max_y = 0,
+    }
+end
+
+local function make_dynamic_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
+    local point: any
+    if inst:IsA("Model") then
+        point = PM_new(inst :: any)
+    else
+        point = PI_new(part)
+    end
+
+    local attach_cfg: { [any]: any } = {}
+
+    local box: any? = nil
+    if config.Box then
+        box           = Drawing_new("Square")
+        box.Visible   = false
+        box.Filled    = false
+        box.Color     = config.BoxColor
+        box.Thickness = 1
+        attach_cfg[box] = { Link = point, Size = BOX_SIZE, AnchorPoint = ANCHOR_CENTER }
+    end
+
+    local label: any? = nil
+    if config.Name then
+        label         = Drawing_new("Text")
+        label.Visible = false
+        label.Color   = config.TextColor
+        label.Size    = config.FontSize
+        label.Center  = true
+        label.Outline = true
+        label.Text    = display
+        attach_cfg[label] = { Link = point, Size = LABEL_SIZE, AnchorPoint = ANCHOR_TOP }
+    end
+
+    local dist_label: any? = nil
+    if config.Distance then
+        dist_label         = Drawing_new("Text")
+        dist_label.Visible = false
+        dist_label.Color   = config.TextColor
+        dist_label.Size    = config.FontSize
+        dist_label.Center  = true
+        dist_label.Outline = true
+        dist_label.Text    = "0m"
+        attach_cfg[dist_label] = { Link = point, Size = LABEL_SIZE, AnchorPoint = ANCHOR_BOTTOM }
+    end
+
+    local cluster = Drawing_attach(attach_cfg)
+
+    dynamic_entries[#dynamic_entries + 1] = {
+        inst       = inst,
+        part       = part,
+        config     = config,
+        point      = point,
+        cluster    = cluster,
+        box        = box,
+        label      = label,
+        dist_label = dist_label,
+        visible    = false,
+        prev_vis   = false,
+        distance   = 0,
+        dist_floor = -1,
+        dist_str   = "0m",
+    }
+end
+
+local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
+    if known[part] ~= nil then return end
+    if not (config.Box or config.Name or config.Distance) then return end
+
+    known[part]          = true
+    known_children[inst] = true
+    config_count[config] = (config_count[config] or 0) + 1
+
+    local mode = config.DrawMode or 0
+    if mode == 1 then
+        make_immediate_entry(inst, part, parts, config, display)
+    elseif mode == 2 then
+        make_dynamic_entry(inst, part, parts, config, display)
+    else
+        make_static_entry(inst, part, parts, config, display)
+    end
+end
+
+local function remove_static_entry(i: number): ()
+    local entry  = static_entries[i]
     local config = entry.config
     known[entry.part]          = nil
     known_children[entry.inst] = nil
@@ -222,15 +369,55 @@ local function remove_entry(i: number): ()
     if entry.box ~= nil        then entry.box:Remove()        end
     if entry.label ~= nil      then entry.label:Remove()      end
     if entry.dist_label ~= nil then entry.dist_label:Remove() end
-    entries[i]        = entries[#entries]
-    entries[#entries] = nil
+    static_entries[i]               = static_entries[#static_entries]
+    static_entries[#static_entries] = nil
+end
+
+local function remove_immediate_entry(i: number): ()
+    local entry  = immediate_entries[i]
+    local config = entry.config
+    known[entry.part]          = nil
+    known_children[entry.inst] = nil
+    config_count[config]       = (config_count[config] or 1) - 1
+    immediate_entries[i]                  = immediate_entries[#immediate_entries]
+    immediate_entries[#immediate_entries] = nil
+end
+
+local function remove_dynamic_entry(i: number): ()
+    local entry  = dynamic_entries[i]
+    local config = entry.config
+    known[entry.part]          = nil
+    known_children[entry.inst] = nil
+    config_count[config]       = (config_count[config] or 1) - 1
+    entry.cluster:Destroy()
+    entry.point:Destroy()
+    dynamic_entries[i]                = dynamic_entries[#dynamic_entries]
+    dynamic_entries[#dynamic_entries] = nil
 end
 
 local function scan(): ()
     local i = 1
-    while i <= #entries do
-        if entries[i].part.Parent == nil then
-            remove_entry(i)
+    while i <= #static_entries do
+        if static_entries[i].part.Parent == nil then
+            remove_static_entry(i)
+        else
+            i += 1
+        end
+    end
+
+    i = 1
+    while i <= #immediate_entries do
+        if immediate_entries[i].part.Parent == nil then
+            remove_immediate_entry(i)
+        else
+            i += 1
+        end
+    end
+
+    i = 1
+    while i <= #dynamic_entries do
+        if dynamic_entries[i].part.Parent == nil then
+            remove_dynamic_entry(i)
         else
             i += 1
         end
@@ -291,10 +478,11 @@ local function on_pre_local(): ()
     if cam == nil then return end
 
     local char: Instance?  = LocalPlayer.Character
-    local hrp: BasePart?   = if char ~= nil then char:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
+    local hrp:  BasePart?  = if char ~= nil then char:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
     local lpos: vector?    = if hrp ~= nil  then hrp.Position :: vector else nil
 
-    for _, entry in entries do
+ 
+    for _, entry in static_entries do
         if not entry.config.Enabled then
             entry.visible = false
             continue
@@ -353,11 +541,99 @@ local function on_pre_local(): ()
 
         entry.visible = vis
     end
+
+   
+    for _, entry in immediate_entries do
+        if not entry.config.Enabled then
+            entry.visible = false
+            continue
+        end
+
+        local part = entry.part
+        local pos  = part.Position :: vector
+        local vis  = false
+
+        if lpos ~= nil then
+            local dist = v_mag(pos - lpos)
+            if dist <= entry.config.MaxDistance then
+                entry.distance = dist
+                vis = true
+
+                if entry.config.Distance then
+                    local df = math_round(dist)
+                    if df ~= entry.dist_floor then
+                        entry.dist_floor = df
+                        entry.dist_str   = `{df}m`
+                    end
+                end
+
+                local center     = pos + entry.box_offset
+                local hs         = entry.box_half
+                local hx, hy, hz = hs.x, hs.y, hs.z
+
+                local min_x, min_y =  INF,  INF
+                local max_x, max_y = -INF, -INF
+                local found        = false
+
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc( hx,  hy,  hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc(-hx,  hy,  hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc( hx, -hy,  hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc(-hx, -hy,  hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc( hx,  hy, -hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc(-hx,  hy, -hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc( hx, -hy, -hz), min_x, min_y, max_x, max_y, found)
+                min_x, min_y, max_x, max_y, found = project_corner(cam, center + vc(-hx, -hy, -hz), min_x, min_y, max_x, max_y, found)
+
+                if found then
+                    entry.s_min_x = min_x
+                    entry.s_min_y = min_y
+                    entry.s_max_x = max_x
+                    entry.s_max_y = max_y
+                else
+                    vis = false
+                end
+            end
+        end
+
+        entry.visible = vis
+    end
+
+ 
+    for _, entry in dynamic_entries do
+        local cfg = entry.config
+        local vis = false
+
+        if cfg.Enabled and lpos ~= nil then
+            local dist = v_mag((entry.part.Position :: vector) - lpos)
+            if dist <= cfg.MaxDistance then
+                entry.distance = dist
+                vis = true
+
+                if cfg.Distance and entry.dist_label ~= nil then
+                    local df = math_round(dist)
+                    if df ~= entry.dist_floor then
+                        entry.dist_floor      = df
+                        entry.dist_str        = `{df}m`
+                        entry.dist_label.Text = entry.dist_str
+                    end
+                end
+            end
+        end
+
+        if vis ~= entry.prev_vis then
+            entry.prev_vis = vis
+            if entry.box ~= nil        then entry.box.Visible        = vis end
+            if entry.label ~= nil      then entry.label.Visible      = vis end
+            if entry.dist_label ~= nil then entry.dist_label.Visible = vis end
+        end
+
+        entry.visible = vis
+    end
 end
 
 @native
 local function on_render(): ()
-    for _, entry in entries do
+    for _, entry in static_entries do
         local vis = entry.visible
 
         if vis ~= entry.prev_vis then
@@ -393,6 +669,31 @@ local function on_render(): ()
             end
         end
     end
+
+    for _, entry in immediate_entries do
+        if not entry.visible then continue end
+
+        local cfg          = entry.config
+        local min_x, min_y = entry.s_min_x, entry.s_min_y
+        local max_x, max_y = entry.s_max_x, entry.s_max_y
+        local mid_x        = (min_x + max_x) * 0.5
+        local fs           = cfg.FontSize
+
+        if cfg.Box then
+            DI_Rect(
+                vec2_new(min_x, min_y),
+                vec2_new(max_x - min_x, max_y - min_y),
+                cfg.BoxColor, 1, 1
+            )
+        end
+        if cfg.Name then
+            DI_OText(vec2_new(mid_x, min_y - fs - 2), fs, cfg.TextColor, 1, entry.display, true)
+        end
+        if cfg.Distance then
+            DI_OText(vec2_new(mid_x, max_y + 4), fs, cfg.TextColor, 1, entry.dist_str, true)
+        end
+    end
+
 end
 
 ---- exports ----
