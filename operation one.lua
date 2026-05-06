@@ -8,7 +8,7 @@ local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 
 type Init = (configs: { [string]: any }) -> ()
-local init: Init = (loadfile("esplib.lua") :: any)()
+local init: Init = loadstring(game:HttpGet("https://raw.githubusercontent.com/Sploiter13/severe/refs/heads/main/esplib.luau"))()
 
 local _override_local      = override_local_data
 local _add_model_data      = add_model_data
@@ -88,7 +88,6 @@ local function findPlayerByName(charName: string): Player?
     return nil
 end
 
--- Compare .Team.Name strings — .Team returns an Instance so .Name gives the string
 local function isTeammate(p: Player): boolean
     local lpTeam = LocalPlayer.Team
     if lpTeam == nil then return false end
@@ -105,68 +104,62 @@ local function buildModelData(
 ): { [string]: any }
     local hum = real.hum
 
-    local fullBodyData: { [string]: any } = {
-        Head            = parts.head,
-        Torso           = parts.torso,
-        LeftArm         = parts.arm1,
-        RightArm        = parts.arm2,
-        LeftLeg         = parts.leg1,
-        RightLeg        = parts.leg2,
-        LeftUpperArm    = parts.arm1,
-        LeftLowerArm    = parts.arm1,
-        LeftHand        = parts.arm1,
-        RightUpperArm   = parts.arm2,
-        RightLowerArm   = parts.arm2,
-        RightHand       = parts.arm2,
-        LeftUpperLeg    = parts.leg1,
-        LeftLowerLeg    = parts.leg1,
-        LeftFoot        = parts.leg1,
-        RightUpperLeg   = parts.leg2,
-        RightLowerLeg   = parts.leg2,
-        RightFoot       = parts.leg2,
-        UpperTorso      = parts.torso,
-        LowerTorso      = parts.torso,
-        BodyHeightScale = 1,
-        RigType         = 1,
-    }
+    local fullBodyData: { [string]: any } = { BodyHeightScale = 1, RigType = 1 }
+    if parts.head      ~= nil then fullBodyData.Head          = parts.head      end
+    if parts.torso     ~= nil then fullBodyData.Torso         = parts.torso     end
+    if parts.torso     ~= nil then fullBodyData.UpperTorso    = parts.torso     end
+    if parts.torso     ~= nil then fullBodyData.LowerTorso    = parts.torso     end
+    if parts.arm1      ~= nil then fullBodyData.LeftArm       = parts.arm1      end
+    if parts.arm1      ~= nil then fullBodyData.LeftUpperArm  = parts.arm1      end
+    if parts.arm1      ~= nil then fullBodyData.LeftLowerArm  = parts.arm1      end
+    if parts.arm1      ~= nil then fullBodyData.LeftHand      = parts.arm1      end
+    if parts.arm2      ~= nil then fullBodyData.RightArm      = parts.arm2      end
+    if parts.arm2      ~= nil then fullBodyData.RightUpperArm = parts.arm2      end
+    if parts.arm2      ~= nil then fullBodyData.RightLowerArm = parts.arm2      end
+    if parts.arm2      ~= nil then fullBodyData.RightHand     = parts.arm2      end
+    if parts.leg1      ~= nil then fullBodyData.LeftLeg       = parts.leg1      end
+    if parts.leg1      ~= nil then fullBodyData.LeftUpperLeg  = parts.leg1      end
+    if parts.leg1      ~= nil then fullBodyData.LeftLowerLeg  = parts.leg1      end
+    if parts.leg1      ~= nil then fullBodyData.LeftFoot      = parts.leg1      end
+    if parts.leg2      ~= nil then fullBodyData.RightLeg      = parts.leg2      end
+    if parts.leg2      ~= nil then fullBodyData.RightUpperLeg = parts.leg2      end
+    if parts.leg2      ~= nil then fullBodyData.RightLowerLeg = parts.leg2      end
+    if parts.leg2      ~= nil then fullBodyData.RightFoot     = parts.leg2      end
 
-    local bodyPartsData: { any } = {
-        { name = "LowerTorso",    part = parts.torso     },
-        { name = "LeftUpperLeg",  part = parts.hip1      },
-        { name = "LeftLowerLeg",  part = parts.leg1      },
-        { name = "RightUpperLeg", part = parts.hip2      },
-        { name = "RightLowerLeg", part = parts.leg2      },
-        { name = "LeftUpperArm",  part = parts.shoulder1 },
-        { name = "LeftLowerArm",  part = parts.arm1      },
-        { name = "RightUpperArm", part = parts.shoulder2 },
-        { name = "RightLowerArm", part = parts.arm2      },
-        { name = "LeftHand",      part = parts.arm1      },
-        { name = "RightHand",     part = parts.arm2      },
-    }
+    local bodyPartsData: { any } = {}
+    local function addBPD(name: string, part: BasePart?): ()
+        if part ~= nil and part.Parent ~= nil then
+            table.insert(bodyPartsData, { name = name, part = part })
+        end
+    end
+    addBPD("LowerTorso",    parts.torso)
+    addBPD("LeftUpperLeg",  parts.hip1)
+    addBPD("LeftLowerLeg",  parts.leg1)
+    addBPD("RightUpperLeg", parts.hip2)
+    addBPD("RightLowerLeg", parts.leg2)
+    addBPD("LeftUpperArm",  parts.shoulder1)
+    addBPD("LeftLowerArm",  parts.arm1)
+    addBPD("RightUpperArm", parts.shoulder2)
+    addBPD("RightLowerArm", parts.arm2)
+    addBPD("LeftHand",      parts.arm1)
+    addBPD("RightHand",     parts.arm2)
 
     local playerTeam = player.Team
     local teamName   = if playerTeam ~= nil then playerTeam.Name else ""
 
-    return {
+    local primaryPart = parts.torso or parts.head
+
+    local data: { [string]: any } = {
         Username        = player.Name,
         Displayname     = player.DisplayName,
         Userid          = player.UserId,
         Character       = vm,
-        PrimaryPart     = parts.torso or parts.head,
+        PrimaryPart     = primaryPart,
         Humanoid        = hum,
-        Head            = parts.head,
-        Torso           = parts.torso,
-        LeftArm         = parts.arm1,
-        RightArm        = parts.arm2,
-        LeftLeg         = parts.leg1,
-        RightLeg        = parts.leg2,
         BodyHeightScale = 1,
         RigType         = 1,
         Whitelisted     = false,
         Archenemies     = false,
-        Aimbot_Part     = parts.head,
-        Aimbot_TP_Part  = parts.head,
-        Triggerbot_Part = parts.head,
         Health          = hum.Health,
         MaxHealth       = hum.MaxHealth,
         body_parts_data = bodyPartsData,
@@ -174,6 +167,22 @@ local function buildModelData(
         Teamname        = teamName,
         Toolname        = "",
     }
+
+    if parts.head  ~= nil then data.Head            = parts.head  end
+    if parts.torso ~= nil then data.Torso           = parts.torso end
+    if parts.arm1  ~= nil then data.LeftArm         = parts.arm1  end
+    if parts.arm2  ~= nil then data.RightArm        = parts.arm2  end
+    if parts.leg1  ~= nil then data.LeftLeg         = parts.leg1  end
+    if parts.leg2  ~= nil then data.RightLeg        = parts.leg2  end
+
+    local aimPart = parts.head or parts.torso
+    if aimPart ~= nil then
+        data.Aimbot_Part     = aimPart
+        data.Aimbot_TP_Part  = aimPart
+        data.Triggerbot_Part = aimPart
+    end
+
+    return data
 end
 
 local function unbind(vm: Instance, entry: Locked): ()
@@ -213,13 +222,22 @@ local function tryBindVM(vm: Instance): ()
     if player == nil then return end
     if player == LocalPlayer then return end
 
-    -- If team check is active, skip teammates entirely — do not add them at all
     if _is_team_check() and isTeammate(player) then return end
 
     if boundUserIds[player.UserId] ~= nil then return end
 
     local parts = getVMParts(vm)
-    if parts.head == nil and parts.torso == nil then return end
+
+    if parts.head      == nil then return end
+    if parts.torso     == nil then return end
+    if parts.arm1      == nil then return end
+    if parts.arm2      == nil then return end
+    if parts.leg1      == nil then return end
+    if parts.leg2      == nil then return end
+    if parts.hip1      == nil then return end
+    if parts.hip2      == nil then return end
+    if parts.shoulder1 == nil then return end
+    if parts.shoulder2 == nil then return end
 
     local key = `vm_{player.UserId}`
 
@@ -330,7 +348,6 @@ RunService.PostLocal:Connect(function(): ()
             continue
         end
 
-        -- If team check flipped on mid-session, unbind teammates retroactively
         if _is_team_check() and isTeammate(entry.player) then
             unbind(vm, entry)
             continue
@@ -342,34 +359,6 @@ RunService.PostLocal:Connect(function(): ()
         }, entry.key)
     end
 end)
-
-local function gadgetOwnerFilter(child: Instance): boolean
-    local owner = child:FindFirstChild("Owner")
-    if owner == nil then return true end
-
-    local usernameLabel = owner:FindFirstChild("Username")
-    if usernameLabel == nil then return true end
-
-    local username: any = nil
-    local ok = pcall(function(): ()
-        username = _mem_readstring(usernameLabel, 0xdc0)
-    end)
-    if not ok or username == nil then return true end
-    if type(username) ~= "string" or username == "" then return true end
-    if username == LocalPlayer.Name then return false end
-
-    local p = Players:FindFirstChild(username)
-    if p ~= nil and p:IsA("Player") then
-        local pp      = p :: Player
-        local lpTeam  = LocalPlayer.Team
-        local ppTeam  = pp.Team
-        if lpTeam ~= nil and ppTeam ~= nil and ppTeam.Name == lpTeam.Name then
-            return false
-        end
-    end
-
-    return true
-end
 
 local gadgetConfigs: { [string]: any } = {
     Gadgets = {
@@ -394,8 +383,7 @@ local gadgetConfigs: { [string]: any } = {
         ExcludeObject     = nil,
         IncludeAttributes = nil,
         ExcludeAttributes = nil,
-        Filter            = gadgetOwnerFilter,
-        Highlight         = true,
+        Highlight         = false,
         Fill              = true,
         Outline           = true,
         FillTransp        = 0.25,
