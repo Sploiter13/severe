@@ -2,6 +2,7 @@
 --!optimize 2
 
 local Players    = game:GetService("Players")
+local Workspace  = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
@@ -19,6 +20,12 @@ local _is_rbx_active     = isrbxactive
 
 local TEAM_T : string = "Terrorists"
 local TEAM_CT: string = "Counter-Terrorists"
+
+local STATE_INTERMISSION: string = "Intermission"
+local STATE_BUY         : string = "Buy Period"
+local STATE_ROUND       : string = "Round In Progress"
+local STATE_WARMUP      : string = "Warmup"
+local STATE_MAP_VOTING  : string = "Map Voting"
 
 type Tracked = {
 	char : Model,
@@ -95,11 +102,41 @@ local function getCharTeam(char: Model): string?
 	return nil
 end
 
-local function getLocalTeam(): string?
-	local char = LocalPlayer.Character
+local function getPlayerTeam(player: Player): string?
+	if player == nil then return nil end
+	if not isUd(player) then return nil end
+	local attr = player:GetAttribute("Team")
+	if attr ~= nil and type(attr) == "string" then
+		if attr == TEAM_T  then return TEAM_T  end
+		if attr == TEAM_CT then return TEAM_CT end
+	end
+	local char = player.Character
 	if char == nil then return nil end
 	if not isUd(char) then return nil end
 	return getCharTeam(char :: Model)
+end
+
+local function getLocalTeam(): string?
+	return getPlayerTeam(LocalPlayer)
+end
+
+local function getGameState(): string?
+	local s = Workspace:GetAttribute("GameState")
+	if s == nil then return nil end
+	if type(s) ~= "string" then return nil end
+	return s :: string
+end
+
+local function getRoundTimer(): number?
+	local s = Workspace:GetAttribute("Timer")
+	if s == nil then return nil end
+	if type(s) ~= "string" then return nil end
+	return tonumber(s :: string)
+end
+
+local function isRoundActive(state: string?): boolean
+	if state == nil then return true end
+	return state == STATE_ROUND or state == STATE_BUY or state == STATE_WARMUP
 end
 
 local function getR15Parts(char: Model): R15Parts?
@@ -256,8 +293,25 @@ local function untrack(player: Player): ()
 	tracked[player] = nil
 end
 
+local function clearAllTracking(): ()
+	for player, entry in tracked do
+		_remove_model_data(entry.key)
+		tracked[player] = nil
+	end
+	if localActive then
+		_clear_local_data()
+		localActive = false
+	end
+end
+
 RunService.PreModel:Connect(function(): ()
 	if not _is_rbx_active() then return end
+
+	local state = getGameState()
+	if not isRoundActive(state) then
+		clearAllTracking()
+		return
+	end
 
 	local localTeam = getLocalTeam()
 	local teamCheck = _is_team_check()
@@ -278,23 +332,23 @@ RunService.PreModel:Connect(function(): ()
 		if p == LocalPlayer then continue end
 		local player = p :: Player
 
-		local char = player.Character
-		if char == nil then
-			untrack(player)
-			continue
-		end
-		if not isUd(char) then
-			untrack(player)
-			continue
-		end
-
-		local theirTeam = getCharTeam(char :: Model)
+		local theirTeam = getPlayerTeam(player)
 		if theirTeam == nil then
 			untrack(player)
 			continue
 		end
 
 		if teamCheck and localTeam ~= nil and theirTeam == localTeam then
+			untrack(player)
+			continue
+		end
+
+		local char = player.Character
+		if char == nil then
+			untrack(player)
+			continue
+		end
+		if not isUd(char) then
 			untrack(player)
 			continue
 		end
@@ -337,6 +391,12 @@ end)
 
 RunService.PostLocal:Connect(function(): ()
 	if not _is_rbx_active() then return end
+
+	local state = getGameState()
+	if not isRoundActive(state) then
+		clearAllTracking()
+		return
+	end
 
 	local lpChar = LocalPlayer.Character
 	if lpChar ~= nil and isUd(lpChar) then
