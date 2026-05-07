@@ -23,12 +23,15 @@ export type ConfigEntry = {
     Filter             : ((Instance) -> boolean)?,
     Highlight          : boolean?,
     Fill               : boolean?,
-    Outline             : boolean?,
+    Outline            : boolean?,
     FillTransp         : number?,
     FillColor          : Color3?,
     OutlineColor       : Color3?,
     OutlineThickness   : number?,
-    HighlightStagger   : number?,
+    Inline             : boolean?,
+    InlineColor        : Color3?,
+    InlineThickness    : number?,
+    MainThickness      : number?,
 }
 
 type HighlightPart = {
@@ -48,11 +51,19 @@ type HighlightPart = {
     wc6       : vector,
     wc7       : vector,
     wc8       : vector,
+    sc_verts  : { Vector2 },
+    sc_n      : number,
+    sc_min_x  : number,
+    sc_min_y  : number,
+    sc_max_x  : number,
+    sc_max_y  : number,
 }
 
 type StaticEntry = {
     inst       : Instance,
     part       : BasePart,
+    part_id    : number,
+    inst_id    : number,
     box_offset : vector,
     box_half   : vector,
     config     : ConfigEntry,
@@ -74,18 +85,13 @@ type StaticEntry = {
     prep_box_size   : Vector2,
     prep_label_pos  : Vector2,
     prep_dist_pos   : Vector2,
-    hl_parts        : { HighlightPart },
-    hl_hull_pts     : { Vector2 },
-    hl_hull_n       : number,
-    hl_visible      : boolean,
-    hl_activated    : boolean,
-    hl_fill_color   : Color3,
-    hl_outline_color: Color3,
 }
 
 type ImmediateEntry = {
     inst       : Instance,
     part       : BasePart,
+    part_id    : number,
+    inst_id    : number,
     box_offset : vector,
     box_half   : vector,
     config     : ConfigEntry,
@@ -102,18 +108,13 @@ type ImmediateEntry = {
     prep_box_size   : Vector2,
     prep_label_pos  : Vector2,
     prep_dist_pos   : Vector2,
-    hl_parts        : { HighlightPart },
-    hl_hull_pts     : { Vector2 },
-    hl_hull_n       : number,
-    hl_visible      : boolean,
-    hl_activated    : boolean,
-    hl_fill_color   : Color3,
-    hl_outline_color: Color3,
 }
 
 type DynamicEntry = {
     inst       : Instance,
     part       : BasePart,
+    part_id    : number,
+    inst_id    : number,
     config     : ConfigEntry,
     point      : any,
     cluster    : any,
@@ -134,8 +135,7 @@ local Players     = game:GetService("Players")
 local Workspace   = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
 
-local INF     = math.huge
-local WEAK_MT = table.freeze({ __mode = "k" })
+local INF = math.huge
 
 local BOX_SIZE      = UDim2.fromScale(1, 1)
 local LABEL_SIZE    = UDim2.fromScale(1, 1)
@@ -144,8 +144,6 @@ local ANCHOR_TOP    = Vector2.new(0.5, 1)
 local ANCHOR_BOTTOM = Vector2.new(0.5, 0)
 
 local PLACEHOLDER_VEC2 = Vector2.new(0, 0)
-local SENTINEL_POS     = vector.create(math.huge, 0, 0)
-local SENTINEL_SIZE    = vector.create(-1, -1, -1)
 
 local v_mag      = vector.magnitude
 local v_min      = vector.min
@@ -153,7 +151,9 @@ local v_max      = vector.max
 local v_zero     = vector.zero
 local math_min   = math.min
 local math_max   = math.max
+local math_abs   = math.abs
 local math_round = math.round
+local math_sqrt  = math.sqrt
 local vec2_new   = Vector2.new
 local vc         = vector.create
 local t_find     = table.find
@@ -174,8 +174,8 @@ local CONFIGS           : { [string]: ConfigEntry }   = {}
 local static_entries    : { StaticEntry }             = {}
 local immediate_entries : { ImmediateEntry }          = {}
 local dynamic_entries   : { DynamicEntry }            = {}
-local known             : { [BasePart]: true? }       = setmetatable({}, WEAK_MT) :: any
-local known_children    : { [Instance]: true? }       = setmetatable({}, WEAK_MT) :: any
+local known          : { [number]: true? }            = {}
+local known_children : { [number]: true? }            = {}
 local config_count      : { [ConfigEntry]: number? }  = {}
 local obj_meta          : { [ConfigEntry]: ObjMeta? } = {}
 
@@ -197,15 +197,36 @@ local function _initial_viewport(): (number, number)
 end
 local cam_vp_x : number, cam_vp_y : number = _initial_viewport()
 
+local function _inst_parent(i: Instance): Instance? return i.Parent end
+local function _inst_class(i: Instance): string return i.ClassName end
+local function _inst_data(i: any): any return i.Data end
+local function _inst_children(i: Instance): { Instance } return i:GetChildren() end
+local function _inst_transp(p: any): number return p.Transparency end
+
+local function validateParent(inst: Instance?): boolean
+    if inst == nil then return false end
+    local ok1, parent = pcall(_inst_parent, inst :: Instance)
+    if not ok1 or parent == nil then return false end
+    local ok2, cn = pcall(_inst_class, inst :: Instance)
+    if not ok2 or cn == "" then return false end
+    local ok3, data = pcall(_inst_data, inst :: any)
+    if not ok3 then return false end
+    local id = tonumber(data :: any)
+    return id ~= nil and id ~= 0
+end
+
+local function getDataId(inst: Instance): number?
+    local ok, data = pcall(_inst_data, inst :: any)
+    if not ok or data == nil then return nil end
+    local id = tonumber(data :: any)
+    return if id ~= nil and id ~= 0 then id else nil
+end
+
 local cfg_inc_active      : { [ConfigEntry]: boolean } = {}
 local cfg_exc_active      : { [ConfigEntry]: boolean } = {}
 local cfg_inc_attr_active : { [ConfigEntry]: boolean } = {}
 local cfg_exc_attr_active : { [ConfigEntry]: boolean } = {}
 
-local cfg_next_act_time : { [ConfigEntry]: number? } = {}
-local stagger_buf       : { any }                    = t_create(64)
-
-local scratch_proj_pts : { Vector2 } = t_create(64)
 
 local function _list_active(list: { string }?): boolean
     if list == nil then return false end
@@ -325,235 +346,7 @@ local function compute_bbox(parts: { BasePart }, anchor_pos: vector): (vector, v
     return center - anchor_pos, (wmax - wmin) * 0.5
 end
 
-local function build_hl_parts(parts: { BasePart }): { HighlightPart }
-    local out: { HighlightPart } = t_create(#parts)
-    for i, p in parts do
-        out[i] = {
-            part      = p,
-            hx        = 0,
-            hy        = 0,
-            hz        = 0,
-            last_pos  = SENTINEL_POS,
-            last_look = v_zero,
-            last_up   = v_zero,
-            last_size = SENTINEL_SIZE,
-            wc1 = v_zero, wc2 = v_zero, wc3 = v_zero, wc4 = v_zero,
-            wc5 = v_zero, wc6 = v_zero, wc7 = v_zero, wc8 = v_zero,
-        }
-    end
-    return out
-end
-
-local function compute_convex_hull(
-    pts: { Vector2 }, n: number,
-    out: { Vector2 }
-): number
-    local ti = n + 1
-    while pts[ti] ~= nil do
-        pts[ti] = nil
-        ti += 1
-    end
-
-    if n < 3 then
-        for j = 1, n do out[j] = pts[j] end
-        local oi = n + 1
-        while out[oi] ~= nil do out[oi] = nil; oi += 1 end
-        return n
-    end
-
-    t_sort(pts, function(a: Vector2, b: Vector2): boolean
-        if a.X == b.X then return a.Y < b.Y end
-        return a.X < b.X
-    end)
-
-    local k = 0
-
-    for j = 1, n do
-        local p = pts[j]
-        local px, py = p.X, p.Y
-        while k >= 2 do
-            local a = out[k - 1]
-            local b = out[k]
-            if (b.X - a.X) * (py - a.Y) - (b.Y - a.Y) * (px - a.X) > 0 then break end
-            out[k] = nil
-            k -= 1
-        end
-        k += 1
-        out[k] = p
-    end
-
-    local lower_t = k + 1
-    for j = n - 1, 1, -1 do
-        local p = pts[j]
-        local px, py = p.X, p.Y
-        while k >= lower_t do
-            local a = out[k - 1]
-            local b = out[k]
-            if (b.X - a.X) * (py - a.Y) - (b.Y - a.Y) * (px - a.X) > 0 then break end
-            out[k] = nil
-            k -= 1
-        end
-        k += 1
-        out[k] = p
-    end
-
-    out[k] = nil
-    k -= 1
-
-    local oi = k + 1
-    while out[oi] ~= nil do out[oi] = nil; oi += 1 end
-
-    return k
-end
-
-@native
-local function compute_highlight(entry: any, cam: any): ()
-    local cfg = entry.config
-    if not (cfg.Fill or cfg.Outline) then
-        entry.hl_visible = false
-        return
-    end
-
-    local hl_parts = entry.hl_parts
-    local n_parts = #hl_parts
-    if n_parts == 0 then
-        entry.hl_visible = false
-        return
-    end
-
-    local parts_dirty = false
-    for j = 1, n_parts do
-        local hp = hl_parts[j]
-        local part = hp.part
-        local cf = part.CFrame
-        local p = cf.Position   :: vector
-        local l = cf.LookVector :: vector
-        local u = cf.UpVector   :: vector
-        local sz = part.Size :: vector
-
-        local changed = false
-        if p ~= hp.last_pos or l ~= hp.last_look or u ~= hp.last_up then
-            hp.last_pos  = p
-            hp.last_look = l
-            hp.last_up   = u
-            changed = true
-        end
-        if sz ~= hp.last_size then
-            hp.last_size = sz
-            hp.hx = sz.x * 0.5
-            hp.hy = sz.y * 0.5
-            hp.hz = sz.z * 0.5
-            changed = true
-        end
-
-        if changed then
-            parts_dirty = true
-            local r   = (cf.RightVector :: vector) * hp.hx
-            local uy  = u * hp.hy
-            local lz  = l * hp.hz
-            local upz = uy + lz
-            local umz = uy - lz
-            hp.wc1 = p + r + upz
-            hp.wc2 = p - r + upz
-            hp.wc3 = p + r - umz
-            hp.wc4 = p - r - umz
-            hp.wc5 = p + r + umz
-            hp.wc6 = p - r + umz
-            hp.wc7 = p + r - upz
-            hp.wc8 = p - r - upz
-        end
-    end
-
-    if not cam_dirty and not parts_dirty then
-        return
-    end
-
-    local vp_min_x = -100
-    local vp_max_x = cam_vp_x + 100
-    local vp_min_y = -100
-    local vp_max_y = cam_vp_y + 100
-
-    local pts = scratch_proj_pts
-    local n = 0
-
-    for j = 1, n_parts do
-        local hp = hl_parts[j]
-        local s: any, vis: boolean
-        local sxv: number, syv: number
-
-        s, vis = cam:WorldToScreenPoint(hp.wc1)
-        if vis then sxv, syv = s.X, s.Y
-            if sxv > vp_min_x and sxv < vp_max_x and syv > vp_min_y and syv < vp_max_y then
-                n += 1; pts[n] = vec2_new(sxv, syv)
-            end
-        end
-        s, vis = cam:WorldToScreenPoint(hp.wc2)
-        if vis then sxv, syv = s.X, s.Y
-            if sxv > vp_min_x and sxv < vp_max_x and syv > vp_min_y and syv < vp_max_y then
-                n += 1; pts[n] = vec2_new(sxv, syv)
-            end
-        end
-        s, vis = cam:WorldToScreenPoint(hp.wc3)
-        if vis then sxv, syv = s.X, s.Y
-            if sxv > vp_min_x and sxv < vp_max_x and syv > vp_min_y and syv < vp_max_y then
-                n += 1; pts[n] = vec2_new(sxv, syv)
-            end
-        end
-        s, vis = cam:WorldToScreenPoint(hp.wc4)
-        if vis then sxv, syv = s.X, s.Y
-            if sxv > vp_min_x and sxv < vp_max_x and syv > vp_min_y and syv < vp_max_y then
-                n += 1; pts[n] = vec2_new(sxv, syv)
-            end
-        end
-        s, vis = cam:WorldToScreenPoint(hp.wc5)
-        if vis then sxv, syv = s.X, s.Y
-            if sxv > vp_min_x and sxv < vp_max_x and syv > vp_min_y and syv < vp_max_y then
-                n += 1; pts[n] = vec2_new(sxv, syv)
-            end
-        end
-        s, vis = cam:WorldToScreenPoint(hp.wc6)
-        if vis then sxv, syv = s.X, s.Y
-            if sxv > vp_min_x and sxv < vp_max_x and syv > vp_min_y and syv < vp_max_y then
-                n += 1; pts[n] = vec2_new(sxv, syv)
-            end
-        end
-        s, vis = cam:WorldToScreenPoint(hp.wc7)
-        if vis then sxv, syv = s.X, s.Y
-            if sxv > vp_min_x and sxv < vp_max_x and syv > vp_min_y and syv < vp_max_y then
-                n += 1; pts[n] = vec2_new(sxv, syv)
-            end
-        end
-        s, vis = cam:WorldToScreenPoint(hp.wc8)
-        if vis then sxv, syv = s.X, s.Y
-            if sxv > vp_min_x and sxv < vp_max_x and syv > vp_min_y and syv < vp_max_y then
-                n += 1; pts[n] = vec2_new(sxv, syv)
-            end
-        end
-    end
-
-    if n < 3 then
-        entry.hl_visible = false
-        entry.hl_hull_n  = 0
-        return
-    end
-
-    local k = compute_convex_hull(pts, n, entry.hl_hull_pts)
-    if k < 3 then
-        entry.hl_visible = false
-        entry.hl_hull_n  = 0
-        return
-    end
-
-    entry.hl_hull_n  = k
-    entry.hl_visible = true
-end
-
-local function _unstaggered(cfg: ConfigEntry): boolean
-    local s = cfg.HighlightStagger
-    return s == nil or s <= 0
-end
-
-local function make_static_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
+local function make_static_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string, part_id: number, inst_id: number): ()
     local box_offset, box_half = compute_bbox(parts, part.Position :: vector)
 
     local box: any? = nil
@@ -587,19 +380,12 @@ local function make_static_entry(inst: Instance, part: BasePart, parts: { BasePa
         dist_label.Text    = "0m"
     end
 
-    local hl_parts: { HighlightPart } = {}
-    local hl_hull_pts: { Vector2 }    = {}
-    local hl_fill_color: Color3       = config.FillColor    or config.BoxColor
-    local hl_outline_color: Color3    = config.OutlineColor or config.BoxColor
-
-    if config.Highlight then
-        hl_parts = build_hl_parts(parts)
-        hl_hull_pts = t_create(#hl_parts * 8 + 1)
-    end
 
     static_entries[#static_entries + 1] = {
         inst       = inst,
         part       = part,
+        part_id    = part_id,
+        inst_id    = inst_id,
         box_offset = box_offset,
         box_half   = box_half,
         config     = config,
@@ -619,32 +405,18 @@ local function make_static_entry(inst: Instance, part: BasePart, parts: { BasePa
         prep_box_size   = PLACEHOLDER_VEC2,
         prep_label_pos  = PLACEHOLDER_VEC2,
         prep_dist_pos   = PLACEHOLDER_VEC2,
-        hl_parts        = hl_parts,
-        hl_hull_pts     = hl_hull_pts,
-        hl_hull_n       = 0,
-        hl_visible      = false,
-        hl_activated    = _unstaggered(config),
-        hl_fill_color   = hl_fill_color,
-        hl_outline_color= hl_outline_color,
     }
 end
 
-local function make_immediate_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
+local function make_immediate_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string, part_id: number, inst_id: number): ()
     local box_offset, box_half = compute_bbox(parts, part.Position :: vector)
 
-    local hl_parts: { HighlightPart } = {}
-    local hl_hull_pts: { Vector2 }    = {}
-    local hl_fill_color: Color3       = config.FillColor    or config.BoxColor
-    local hl_outline_color: Color3    = config.OutlineColor or config.BoxColor
-
-    if config.Highlight then
-        hl_parts = build_hl_parts(parts)
-        hl_hull_pts = t_create(#hl_parts * 8 + 1)
-    end
 
     immediate_entries[#immediate_entries + 1] = {
         inst       = inst,
         part       = part,
+        part_id    = part_id,
+        inst_id    = inst_id,
         box_offset = box_offset,
         box_half   = box_half,
         config     = config,
@@ -659,17 +431,10 @@ local function make_immediate_entry(inst: Instance, part: BasePart, parts: { Bas
         prep_box_size   = PLACEHOLDER_VEC2,
         prep_label_pos  = PLACEHOLDER_VEC2,
         prep_dist_pos   = PLACEHOLDER_VEC2,
-        hl_parts        = hl_parts,
-        hl_hull_pts     = hl_hull_pts,
-        hl_hull_n       = 0,
-        hl_visible      = false,
-        hl_activated    = _unstaggered(config),
-        hl_fill_color   = hl_fill_color,
-        hl_outline_color= hl_outline_color,
     }
 end
 
-local function make_dynamic_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
+local function make_dynamic_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string, part_id: number, inst_id: number): ()
     local point: any
     if inst:IsA("Model") then
         point = PM_new(inst :: any)
@@ -718,6 +483,8 @@ local function make_dynamic_entry(inst: Instance, part: BasePart, parts: { BaseP
     dynamic_entries[#dynamic_entries + 1] = {
         inst       = inst,
         part       = part,
+        part_id    = part_id,
+        inst_id    = inst_id,
         config     = config,
         point      = point,
         cluster    = cluster,
@@ -733,29 +500,32 @@ local function make_dynamic_entry(inst: Instance, part: BasePart, parts: { BaseP
 end
 
 local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
-    if known[part] ~= nil then return end
+    local partId = getDataId(part)
+    local instId = getDataId(inst)
+    if partId == nil or instId == nil then return end
+    if known[partId] ~= nil then return end
     if not (config.Box or config.Name or config.Distance or config.Highlight) then return end
 
-    known[part]          = true
-    known_children[inst] = true
-    config_count[config] = (config_count[config] or 0) + 1
+    known[partId]          = true
+    known_children[instId] = true
+    config_count[config]   = (config_count[config] or 0) + 1
 
     local mode = config.DrawMode or 0
     if mode == 1 then
-        make_immediate_entry(inst, part, parts, config, display)
+        make_immediate_entry(inst, part, parts, config, display, partId, instId)
     elseif mode == 2 then
-        make_dynamic_entry(inst, part, parts, config, display)
+        make_dynamic_entry(inst, part, parts, config, display, partId, instId)
     else
-        make_static_entry(inst, part, parts, config, display)
+        make_static_entry(inst, part, parts, config, display, partId, instId)
     end
 end
 
 local function remove_static_entry(i: number): ()
     local entry  = static_entries[i]
     local config = entry.config
-    known[entry.part]          = nil
-    known_children[entry.inst] = nil
-    config_count[config]       = (config_count[config] or 1) - 1
+    known[entry.part_id]          = nil
+    known_children[entry.inst_id] = nil
+    config_count[config]          = (config_count[config] or 1) - 1
     if entry.box ~= nil        then entry.box:Remove()        end
     if entry.label ~= nil      then entry.label:Remove()      end
     if entry.dist_label ~= nil then entry.dist_label:Remove() end
@@ -766,9 +536,9 @@ end
 local function remove_immediate_entry(i: number): ()
     local entry  = immediate_entries[i]
     local config = entry.config
-    known[entry.part]          = nil
-    known_children[entry.inst] = nil
-    config_count[config]       = (config_count[config] or 1) - 1
+    known[entry.part_id]          = nil
+    known_children[entry.inst_id] = nil
+    config_count[config]          = (config_count[config] or 1) - 1
     immediate_entries[i]                  = immediate_entries[#immediate_entries]
     immediate_entries[#immediate_entries] = nil
 end
@@ -776,9 +546,9 @@ end
 local function remove_dynamic_entry(i: number): ()
     local entry  = dynamic_entries[i]
     local config = entry.config
-    known[entry.part]          = nil
-    known_children[entry.inst] = nil
-    config_count[config]       = (config_count[config] or 1) - 1
+    known[entry.part_id]          = nil
+    known_children[entry.inst_id] = nil
+    config_count[config]          = (config_count[config] or 1) - 1
     entry.cluster:Destroy()
     entry.point:Destroy()
     dynamic_entries[i]                = dynamic_entries[#dynamic_entries]
@@ -789,7 +559,7 @@ local function scan(): ()
     local i = 1
     while i <= #static_entries do
         local e = static_entries[i]
-        if e.part.Parent == nil or e.inst.Parent == nil then
+        if not validateParent(e.part) or not validateParent(e.inst) then
             remove_static_entry(i)
         else
             i += 1
@@ -799,7 +569,7 @@ local function scan(): ()
     i = 1
     while i <= #immediate_entries do
         local e = immediate_entries[i]
-        if e.part.Parent == nil or e.inst.Parent == nil then
+        if not validateParent(e.part) or not validateParent(e.inst) then
             remove_immediate_entry(i)
         else
             i += 1
@@ -809,7 +579,7 @@ local function scan(): ()
     i = 1
     while i <= #dynamic_entries do
         local e = dynamic_entries[i]
-        if e.part.Parent == nil or e.inst.Parent == nil then
+        if not validateParent(e.part) or not validateParent(e.inst) then
             remove_dynamic_entry(i)
         else
             i += 1
@@ -819,9 +589,10 @@ local function scan(): ()
     for _, config in CONFIGS do
         if not config.Enabled then continue end
 
-        if config.Folder ~= nil and config.Folder.Parent ~= nil then
+        if config.Folder ~= nil and validateParent(config.Folder) then
             for _, child in config.Folder:GetChildren() do
-                if known_children[child] ~= nil then continue end
+                local childId = getDataId(child)
+                if childId == nil or known_children[childId] ~= nil then continue end
                 if should_draw(child, config) then
                     local part, obj_name, parts = resolve(child)
                     if part ~= nil then
@@ -835,20 +606,23 @@ local function scan(): ()
             if meta == nil then continue end
 
             local parent = meta.parent
-            if parent == nil or parent.Parent == nil then continue end
+            if not validateParent(parent) then continue end
 
             if config.MultiSameObject == true then
-                for _, child in parent:GetChildren() do
-                    if child.Name == meta.name and known_children[child] == nil then
-                        local part, obj_name, parts = resolve(child)
-                        if part ~= nil then
-                            make_entry(child, part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
+                for _, child in (parent :: Instance):GetChildren() do
+                    if child.Name == meta.name then
+                        local childId = getDataId(child)
+                        if childId ~= nil and known_children[childId] == nil then
+                            local part, obj_name, parts = resolve(child)
+                            if part ~= nil then
+                                make_entry(child, part, parts, config, if config.UseCustomName then config.CustomName else obj_name)
+                            end
                         end
                     end
                 end
             else
                 if (config_count[config] or 0) == 0 then
-                    for _, child in parent:GetChildren() do
+                    for _, child in (parent :: Instance):GetChildren() do
                         if child.Name == meta.name then
                             local part, obj_name, parts = resolve(child)
                             if part ~= nil then
@@ -898,7 +672,11 @@ local function on_pre_local(): ()
         local cfg = entry.config
         if not cfg.Enabled or lpos == nil then
             entry.visible = false
-            entry.hl_visible = false
+            continue
+        end
+
+        if not validateParent(entry.part) then
+            entry.visible = false
             continue
         end
 
@@ -908,7 +686,6 @@ local function on_pre_local(): ()
 
         if dist > cfg.MaxDistance then
             entry.visible = false
-            entry.hl_visible = false
             continue
         end
 
@@ -931,7 +708,11 @@ local function on_pre_local(): ()
         local cfg = entry.config
         if not cfg.Enabled or lpos == nil then
             entry.visible = false
-            entry.hl_visible = false
+            continue
+        end
+
+        if not validateParent(entry.part) then
+            entry.visible = false
             continue
         end
 
@@ -941,7 +722,6 @@ local function on_pre_local(): ()
 
         if dist > cfg.MaxDistance then
             entry.visible = false
-            entry.hl_visible = false
             continue
         end
 
@@ -962,7 +742,7 @@ local function on_pre_local(): ()
         local cfg = entry.config
         local vis = false
 
-        if cfg.Enabled and lpos ~= nil then
+        if cfg.Enabled and lpos ~= nil and validateParent(entry.part) then
             local dist = v_mag((entry.part.Position :: vector) - lpos)
             if dist <= cfg.MaxDistance then
                 entry.distance = dist
@@ -990,60 +770,19 @@ local function on_pre_local(): ()
     end
 end
 
-local function _process_stagger(now: number): ()
-    for _, cfg in CONFIGS do
-        if not cfg.Highlight then continue end
-        local stagger = cfg.HighlightStagger
-        if stagger == nil or stagger <= 0 then continue end
-
-        local cand_n = 0
-        for i = 1, pending_static_n do
-            local e = pending_static[i]
-            if e.config == cfg and not e.hl_activated then
-                cand_n += 1
-                stagger_buf[cand_n] = e
-            end
-        end
-        for i = 1, pending_immediate_n do
-            local e = pending_immediate[i]
-            if e.config == cfg and not e.hl_activated then
-                cand_n += 1
-                stagger_buf[cand_n] = e
-            end
-        end
-
-        if cand_n == 0 then continue end
-
-        local ti = cand_n + 1
-        while stagger_buf[ti] ~= nil do stagger_buf[ti] = nil; ti += 1 end
-
-        if cand_n > 1 then
-            t_sort(stagger_buf, function(a: any, b: any): boolean
-                return a.distance < b.distance
-            end)
-        end
-
-        local next_t = cfg_next_act_time[cfg] or 0
-        if now >= next_t then
-            stagger_buf[1].hl_activated = true
-            cfg_next_act_time[cfg] = now + stagger
-        end
-
-        for i = 1, cand_n do stagger_buf[i] = nil end
-    end
-end
-
 @native
 local function on_post_local(): ()
     local cam = Workspace.CurrentCamera
     if cam == nil then return end
 
-    local now = os_clock()
-    _process_stagger(now)
-
     for i = 1, pending_static_n do
         local entry = pending_static[i]
         local cfg   = entry.config
+
+        if not validateParent(entry.part) then
+            entry.visible = false
+            continue
+        end
 
         if cfg.Box or cfg.Name or cfg.Distance then
             local pos        = entry.part.Position :: vector
@@ -1088,14 +827,16 @@ local function on_post_local(): ()
             entry.visible = false
         end
 
-        if cfg.Highlight and entry.hl_activated then
-            compute_highlight(entry, cam)
-        end
     end
 
     for i = 1, pending_immediate_n do
         local entry = pending_immediate[i]
         local cfg   = entry.config
+
+        if not validateParent(entry.part) then
+            entry.visible = false
+            continue
+        end
 
         if cfg.Box or cfg.Name or cfg.Distance then
             local pos        = entry.part.Position :: vector
@@ -1139,14 +880,335 @@ local function on_post_local(): ()
             entry.visible = false
         end
 
-        if cfg.Highlight and entry.hl_activated then
-            compute_highlight(entry, cam)
+    end
+end
+
+local _hl_intersection_cuts : { number }  = {}
+local _hl_blocking_polys    : { any }     = {}
+local _hl_screen_polys      : { any }     = {}
+local _hl_outline_segments  : { Vector2 } = {}
+local _hl_lower_scratch     : { Vector2 } = t_create(16)
+local _hl_upper_scratch     : { Vector2 } = t_create(16)
+
+local function _hl_cross2d(o: Vector2, a: Vector2, b: Vector2): number
+    return (a.X - o.X) * (b.Y - o.Y) - (a.Y - o.Y) * (b.X - o.X)
+end
+
+local function _hl_sort_xy(a: Vector2, b: Vector2): boolean
+    return a.X < b.X or (a.X == b.X and a.Y < b.Y)
+end
+
+local function _hl_convex_hull(pts: { Vector2 }): { Vector2 }
+    local n = #pts
+    if n < 3 then return pts end
+    table.sort(pts, _hl_sort_xy)
+
+    local lower = _hl_lower_scratch
+    local upper = _hl_upper_scratch
+    local lc, uc = 0, 0
+
+    for i = 1, n do
+        local p = pts[i]
+        while lc >= 2 and _hl_cross2d(lower[lc - 1], lower[lc], p) <= 0 do
+            lower[lc] = nil; lc -= 1
         end
+        lc += 1; lower[lc] = p
+    end
+    for i = n, 1, -1 do
+        local p = pts[i]
+        while uc >= 2 and _hl_cross2d(upper[uc - 1], upper[uc], p) <= 0 do
+            upper[uc] = nil; uc -= 1
+        end
+        uc += 1; upper[uc] = p
+    end
+
+    local hull: { Vector2 } = t_create(lc + uc)
+    local hc = 0
+    for i = 1, lc - 1 do hc += 1; hull[hc] = lower[i] end
+    for i = 1, uc - 1 do hc += 1; hull[hc] = upper[i] end
+    if hc > 0 then hull[hc + 1] = hull[1] end
+    return hull
+end
+
+local function _hl_point_in_poly(px: number, py: number, poly: { Vector2 }, bb: any): boolean
+    if px < bb.MinX or px > bb.MaxX or py < bb.MinY or py > bb.MaxY then return false end
+    local inside = false
+    local prev   = #poly
+    for cur = 1, #poly do
+        local cv = poly[cur]
+        local pv = poly[prev]
+        if ((cv.Y > py) ~= (pv.Y > py)) and
+           (px < (pv.X - cv.X) * (py - cv.Y) / (pv.Y - cv.Y) + cv.X) then
+            inside = not inside
+        end
+        prev = cur
+    end
+    return inside
+end
+
+local function _hl_seg_intersect(p1x: number, p1y: number, p2x: number, p2y: number,
+                                  p3x: number, p3y: number, p4x: number, p4y: number): number?
+    local denom = (p4y - p3y) * (p2x - p1x) - (p4x - p3x) * (p2y - p1y)
+    if math_abs(denom) < 1e-5 then return nil end
+    local t = ((p4x - p3x) * (p1y - p3y) - (p4y - p3y) * (p1x - p3x)) / denom
+    local u = ((p2x - p1x) * (p1y - p3y) - (p2y - p1y) * (p1x - p3x)) / denom
+    if t >= 0 and t <= 1 and u >= 0 and u <= 1 then return t end
+    return nil
+end
+
+local function _hl_project_part(part: BasePart, cam: any, vp_x: number, vp_y: number): { Vector2 }
+    local pos = part.Position
+    local rv  = part.RightVector
+    local uv  = part.UpVector
+    local lv  = part.LookVector
+    local px, py, pz   = pos.X, pos.Y, pos.Z
+    local rvx, rvy, rvz = rv.X, rv.Y, rv.Z
+    local uvx, uvy, uvz = uv.X, uv.Y, uv.Z
+    local lvx, lvy, lvz = lv.X, lv.Y, lv.Z
+    local sz  = part.Size
+    local hx  = sz.X * 0.5
+    local hy  = sz.Y * 0.5
+    local hz  = sz.Z * 0.5
+    local vp1 = vp_x + 100
+    local vp2 = vp_y + 100
+
+    local out: { Vector2 } = {}
+    local n = 0
+    local sp: any
+    local vis: boolean
+    local sx: number
+    local sy: number
+
+    sp, vis = cam:WorldToScreenPoint(vc(px + rvx*hx + uvx*hy + lvx*hz, py + rvy*hx + uvy*hy + lvy*hz, pz + rvz*hx + uvz*hy + lvz*hz))
+    if vis then sx, sy = sp.X, sp.Y; if sx > -100 and sx < vp1 and sy > -100 and sy < vp2 then n += 1; out[n] = vec2_new(sx, sy) end end
+    sp, vis = cam:WorldToScreenPoint(vc(px + rvx*hx + uvx*hy - lvx*hz, py + rvy*hx + uvy*hy - lvy*hz, pz + rvz*hx + uvz*hy - lvz*hz))
+    if vis then sx, sy = sp.X, sp.Y; if sx > -100 and sx < vp1 and sy > -100 and sy < vp2 then n += 1; out[n] = vec2_new(sx, sy) end end
+    sp, vis = cam:WorldToScreenPoint(vc(px + rvx*hx - uvx*hy + lvx*hz, py + rvy*hx - uvy*hy + lvy*hz, pz + rvz*hx - uvz*hy + lvz*hz))
+    if vis then sx, sy = sp.X, sp.Y; if sx > -100 and sx < vp1 and sy > -100 and sy < vp2 then n += 1; out[n] = vec2_new(sx, sy) end end
+    sp, vis = cam:WorldToScreenPoint(vc(px + rvx*hx - uvx*hy - lvx*hz, py + rvy*hx - uvy*hy - lvy*hz, pz + rvz*hx - uvz*hy - lvz*hz))
+    if vis then sx, sy = sp.X, sp.Y; if sx > -100 and sx < vp1 and sy > -100 and sy < vp2 then n += 1; out[n] = vec2_new(sx, sy) end end
+    sp, vis = cam:WorldToScreenPoint(vc(px - rvx*hx + uvx*hy + lvx*hz, py - rvy*hx + uvy*hy + lvy*hz, pz - rvz*hx + uvz*hy + lvz*hz))
+    if vis then sx, sy = sp.X, sp.Y; if sx > -100 and sx < vp1 and sy > -100 and sy < vp2 then n += 1; out[n] = vec2_new(sx, sy) end end
+    sp, vis = cam:WorldToScreenPoint(vc(px - rvx*hx + uvx*hy - lvx*hz, py - rvy*hx + uvy*hy - lvy*hz, pz - rvz*hx + uvz*hy - lvz*hz))
+    if vis then sx, sy = sp.X, sp.Y; if sx > -100 and sx < vp1 and sy > -100 and sy < vp2 then n += 1; out[n] = vec2_new(sx, sy) end end
+    sp, vis = cam:WorldToScreenPoint(vc(px - rvx*hx - uvx*hy + lvx*hz, py - rvy*hx - uvy*hy + lvy*hz, pz - rvz*hx - uvz*hy + lvz*hz))
+    if vis then sx, sy = sp.X, sp.Y; if sx > -100 and sx < vp1 and sy > -100 and sy < vp2 then n += 1; out[n] = vec2_new(sx, sy) end end
+    sp, vis = cam:WorldToScreenPoint(vc(px - rvx*hx - uvx*hy - lvx*hz, py - rvy*hx - uvy*hy - lvy*hz, pz - rvz*hx - uvz*hy - lvz*hz))
+    if vis then sx, sy = sp.X, sp.Y; if sx > -100 and sx < vp1 and sy > -100 and sy < vp2 then n += 1; out[n] = vec2_new(sx, sy) end end
+
+    return out
+end
+
+local function _hl_is_outer_edge(es: Vector2, ee: Vector2, pi: number, polys: { any }): boolean
+    local tol = 0.1
+    for oi = 1, #polys do
+        if oi ~= pi then
+            local ov = polys[oi].Vertices
+            for vi = 1, #ov - 1 do
+                local v1, v2 = ov[vi], ov[vi + 1]
+                local same = math_abs(v1.X - es.X) < tol and math_abs(v1.Y - es.Y) < tol
+                          and math_abs(v2.X - ee.X) < tol and math_abs(v2.Y - ee.Y) < tol
+                local rev  = math_abs(v1.X - ee.X) < tol and math_abs(v1.Y - ee.Y) < tol
+                          and math_abs(v2.X - es.X) < tol and math_abs(v2.Y - es.Y) < tol
+                if same or rev then return false end
+            end
+        end
+    end
+    return true
+end
+
+local function _hl_normal(p1: Vector2, p2: Vector2): (number, number)
+    local dx  = p2.X - p1.X
+    local dy  = p2.Y - p1.Y
+    local len = math_sqrt(dx * dx + dy * dy)
+    if len < 0.001 then return 0, 0 end
+    return -dy / len, dx / len
+end
+
+local function _hl_get_parts(inst: Instance): { BasePart }
+    local out: { BasePart } = {}
+    if inst:IsA("BasePart") then
+        if (inst :: BasePart).Transparency < 1 then out[1] = inst :: BasePart end
+        return out
+    end
+    local ok, children = pcall(_inst_children, inst)
+    if not ok or children == nil then return out end
+    for _, c in children do
+        local cn = c.ClassName
+        if (cn == "Part" or cn == "MeshPart" or cn == "UnionOperation") then
+            local ok2, tr = pcall(_inst_transp, c :: any)
+            if ok2 and tr < 1 then out[#out + 1] = c :: BasePart end
+        end
+    end
+    return out
+end
+
+local function hl_render(inst: Instance, cfg: ConfigEntry, cam: any): ()
+    local color          = cfg.BoxColor
+    local show_outline   = cfg.Outline ~= false
+    local outline_color  = cfg.OutlineColor  or Color3.fromRGB(0, 0, 0)
+    local outline_thick  = cfg.OutlineThickness or 1
+    local show_inline    = cfg.Inline or false
+    local inline_color   = cfg.InlineColor   or outline_color
+    local inline_thick   = cfg.InlineThickness or outline_thick
+    local show_fill      = cfg.Fill or false
+    local fill_color     = cfg.FillColor     or color
+    local fill_opacity   = cfg.FillTransp    or 1
+    local main_thick     = cfg.MainThickness or 1
+
+    local segs    = _hl_outline_segments
+    local seg_n   = 0
+    for i = 1, #segs do segs[i] = nil end
+
+    local valid_parts = _hl_get_parts(inst)
+    if #valid_parts == 0 then return end
+
+    local polys   = _hl_screen_polys
+    local poly_n  = 0
+    local vp_x    = cam_vp_x
+    local vp_y    = cam_vp_y
+
+    for pi = 1, #valid_parts do
+        local spts = _hl_project_part(valid_parts[pi], cam, vp_x, vp_y)
+        if #spts >= 3 then
+            local hull = _hl_convex_hull(spts)
+            local min_x, min_y =  100000,  100000
+            local max_x, max_y = -100000, -100000
+            for _, v in hull do
+                if v.X < min_x then min_x = v.X end
+                if v.X > max_x then max_x = v.X end
+                if v.Y < min_y then min_y = v.Y end
+                if v.Y > max_y then max_y = v.Y end
+            end
+            poly_n += 1
+            polys[poly_n] = {
+                Vertices = hull,
+                BBox     = { MinX = min_x, MinY = min_y, MaxX = max_x, MaxY = max_y },
+            }
+        end
+    end
+    for ci = poly_n + 1, #polys do polys[ci] = nil end
+    if poly_n == 0 then return end
+
+    if show_fill then
+        for pi = 1, poly_n do
+            local verts = polys[pi].Vertices
+            local vn    = #verts
+            if vn >= 3 then
+                local p1 = verts[1]
+                for i = 2, vn - 2 do
+                    DI_FTri(p1, verts[i], verts[i + 1], fill_color, fill_opacity)
+                end
+            end
+        end
+    end
+
+    local blockers = _hl_blocking_polys
+    local cuts     = _hl_intersection_cuts
+
+    for pi = 1, poly_n do
+        local cpoly   = polys[pi]
+        local cverts  = cpoly.Vertices
+        local cbbox   = cpoly.BBox
+        local vc_n    = #cverts
+
+        local block_n = 0
+        for oi = 1, poly_n do
+            if oi ~= pi then
+                local ob = polys[oi].BBox
+                if not (cbbox.MinX > ob.MaxX or cbbox.MaxX < ob.MinX or
+                        cbbox.MinY > ob.MaxY or cbbox.MaxY < ob.MinY) then
+                    block_n += 1; blockers[block_n] = polys[oi]
+                end
+            end
+        end
+
+        for vi = 1, vc_n - 1 do
+            local vs = cverts[vi]
+            local ve = cverts[vi + 1]
+
+            if _hl_is_outer_edge(vs, ve, pi, polys) then
+                local ax, ay = vs.X, vs.Y
+                local bx, by = ve.X, ve.Y
+                local emin_x = math_min(ax, bx)
+                local emax_x = math_max(ax, bx)
+                local emin_y = math_min(ay, by)
+                local emax_y = math_max(ay, by)
+
+                local cut_n = 2
+                cuts[1] = 0; cuts[2] = 1
+                for ci = 3, #cuts do cuts[ci] = nil end
+
+                for bi = 1, block_n do
+                    local blk  = blockers[bi]
+                    local bb   = blk.BBox
+                    if not (emin_x > bb.MaxX or emax_x < bb.MinX or
+                            emin_y > bb.MaxY or emax_y < bb.MinY) then
+                        local bv   = blk.Vertices
+                        local bv_n = #bv
+                        for bvi = 1, bv_n - 1 do
+                            local t = _hl_seg_intersect(
+                                ax, ay, bx, by,
+                                bv[bvi].X, bv[bvi].Y, bv[bvi + 1].X, bv[bvi + 1].Y
+                            )
+                            if t ~= nil then cut_n += 1; cuts[cut_n] = t end
+                        end
+                    end
+                end
+
+                table.sort(cuts)
+
+                local prev_cut = cuts[1]
+                for ci = 2, cut_n do
+                    local curr_cut = cuts[ci]
+                    if curr_cut > prev_cut + 0.001 then
+                        local mid_t = (prev_cut + curr_cut) * 0.5
+                        local mid_x = ax + (bx - ax) * mid_t
+                        local mid_y = ay + (by - ay) * mid_t
+                        local occ   = false
+                        for bi = 1, block_n do
+                            if _hl_point_in_poly(mid_x, mid_y, blockers[bi].Vertices, blockers[bi].BBox) then
+                                occ = true; break
+                            end
+                        end
+                        if not occ then
+                            seg_n += 1
+                            segs[seg_n * 2 - 1] = vec2_new(ax + (bx - ax) * prev_cut, ay + (by - ay) * prev_cut)
+                            segs[seg_n * 2]     = vec2_new(ax + (bx - ax) * curr_cut, ay + (by - ay) * curr_cut)
+                        end
+                    end
+                    prev_cut = curr_cut
+                end
+            end
+        end
+    end
+
+    for i = 1, seg_n do
+        local ss     = segs[i * 2 - 1]
+        local se     = segs[i * 2]
+        local nx, ny = _hl_normal(ss, se)
+
+        if show_outline then
+            DI_Line(
+                vec2_new(ss.X + nx * outline_thick, ss.Y + ny * outline_thick),
+                vec2_new(se.X + nx * outline_thick, se.Y + ny * outline_thick),
+                outline_color, 1, 1, outline_thick
+            )
+        end
+        if show_inline then
+            DI_Line(
+                vec2_new(ss.X - nx * inline_thick, ss.Y - ny * inline_thick),
+                vec2_new(se.X - nx * inline_thick, se.Y - ny * inline_thick),
+                inline_color, 1, 1, inline_thick
+            )
+        end
+        DI_Line(ss, se, color, 1, 1, main_thick)
     end
 end
 
 @native
 local function on_render(): ()
+    local cam = Workspace.CurrentCamera
     for _, entry in static_entries do
         local vis = entry.visible
 
@@ -1172,28 +1234,8 @@ local function on_render(): ()
             entry.dist_label.Text = entry.dist_str
         end
 
-        if entry.hl_visible then
-            local cfg = entry.config
-            local pts = entry.hl_hull_pts
-            local k   = entry.hl_hull_n
-
-            if cfg.Fill and k >= 3 then
-                local fc = entry.hl_fill_color
-                local op = cfg.FillTransp or 1
-                local p1 = pts[1]
-                for ti = 2, k - 1 do
-                    DI_FTri(p1, pts[ti], pts[ti + 1], fc, op)
-                end
-            end
-
-            if cfg.Outline and k >= 2 then
-                local oc = entry.hl_outline_color
-                local ot = cfg.OutlineThickness or 1
-                for ei = 1, k - 1 do
-                    DI_Line(pts[ei], pts[ei + 1], oc, 1, 1, ot)
-                end
-                DI_Line(pts[k], pts[1], oc, 1, 1, ot)
-            end
+        if vis and entry.config.Highlight and cam ~= nil then
+            hl_render(entry.inst, entry.config, cam)
         end
     end
 
@@ -1205,28 +1247,8 @@ local function on_render(): ()
             if cfg.Distance then DI_OText(entry.prep_dist_pos,  cfg.FontSize, cfg.TextColor, 1, entry.dist_str, true) end
         end
 
-        if entry.hl_visible then
-            local cfg = entry.config
-            local pts = entry.hl_hull_pts
-            local k   = entry.hl_hull_n
-
-            if cfg.Fill and k >= 3 then
-                local fc = entry.hl_fill_color
-                local op = cfg.FillTransp or 1
-                local p1 = pts[1]
-                for ti = 2, k - 1 do
-                    DI_FTri(p1, pts[ti], pts[ti + 1], fc, op)
-                end
-            end
-
-            if cfg.Outline and k >= 2 then
-                local oc = entry.hl_outline_color
-                local ot = cfg.OutlineThickness or 1
-                for ei = 1, k - 1 do
-                    DI_Line(pts[ei], pts[ei + 1], oc, 1, 1, ot)
-                end
-                DI_Line(pts[k], pts[1], oc, 1, 1, ot)
-            end
+        if entry.visible and entry.config.Highlight and cam ~= nil then
+            hl_render(entry.inst, entry.config, cam)
         end
     end
 end
