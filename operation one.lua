@@ -1,674 +1,535 @@
---!native
+--!strict
 --!optimize 2
 
----- environment ----
+local Players    = game:GetService("Players")
+local Workspace  = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
-local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
 
-local MemoryReadF32 = memory.readf32
-local MathRound = math.round
-local MathSqrt = math.sqrt
-local MathFloor = math.floor
-local MathClamp = math.clamp
-local TableInsert = table.insert
-local TableConcat = table.concat
-local TableClear = table.clear
-local StringFormat = string.format
-local VectorMagnitude = vector.magnitude
-local VectorCreate = vector.create
-local Pcall = pcall
-local OsClock = os.clock
+local LocalPlayer = Players.LocalPlayer
 
----- constants ----
-local OUTLINE_COLOR_GREEN_OFFSET: number = 0xEC
-local TARGET_GREEN_VALUE: number = 150
+type Init = (configs: { [string]: any }) -> ()
+local init: Init = loadstring(game:HttpGet("https://raw.githubusercontent.com/Sploiter13/severe/refs/heads/main/esplib.luau"))()
 
-local DEBUG_MODE: boolean = false
-local DRONE_MAX_DISTANCE: number = 2000
-local DRONE_SIZE_MIN: number = 50
-local DRONE_SIZE_MAX: number = 200
-local DRONE_SIZE_DIVISOR: number = 2000
+local _override_local    = override_local_data
+local _add_model_data    = add_model_data
+local _edit_model_data   = edit_model_data
+local _remove_model_data = remove_model_data
+local _clear_local_data  = clear_local_data
+local _is_team_check     = is_team_check_active
 
-local PART_NAMES: {string} = {"head", "torso", "arm1", "arm2", "leg1", "leg2", "hip1", "hip2", "shoulder1", "shoulder2"}
-
-local FALLBACK_MAP: {[string]: {string}} = {
-    arm2 = {"arm1", "torso", "head"},
-    arm1 = {"arm2", "torso", "head"},
-    leg2 = {"leg1", "torso", "head"},
-    leg1 = {"leg2", "torso", "head"},
-    hip1 = {"leg1", "torso", "head"},
-    hip2 = {"leg2", "torso", "head"},
-    shoulder1 = {"arm1", "torso", "head"},
-    shoulder2 = {"arm2", "torso", "head"},
-    torso = {"head"},
-    head = {"torso"}
+local PART_NAMES: { string } = {
+	"head", "torso", "arm1", "arm2",
+	"leg1", "leg2", "hip1", "hip2",
+	"shoulder1", "shoulder2",
 }
 
-local FULL_BODY_MAP: {[string]: string} = {
-    head = "Head",
-    torso = "Torso",
-    arm1 = "Left Arm",
-    arm2 = "Right Arm",
-    leg1 = "Left Leg",
-    leg2 = "Right Leg",
-    hip1 = "LeftUpperLeg",
-    hip2 = "RightUpperLeg",
-    shoulder1 = "LeftUpperArm",
-    shoulder2 = "RightUpperArm"
+local FALLBACK_MAP: { [string]: { string } } = {
+	arm2      = { "arm1",  "torso", "head" },
+	arm1      = { "arm2",  "torso", "head" },
+	leg2      = { "leg1",  "torso", "head" },
+	leg1      = { "leg2",  "torso", "head" },
+	hip1      = { "leg1",  "torso", "head" },
+	hip2      = { "leg2",  "torso", "head" },
+	shoulder1 = { "arm1",  "torso", "head" },
+	shoulder2 = { "arm2",  "torso", "head" },
+	torso     = { "head"               },
+	head      = { "torso"              },
 }
 
----- types ----
-export type BodyParts = {
-    head: BasePart?,
-    torso: BasePart?,
-    arm1: BasePart?,
-    arm2: BasePart?,
-    leg1: BasePart?,
-    leg2: BasePart?,
-    hip1: BasePart?,
-    hip2: BasePart?,
-    shoulder1: BasePart?,
-    shoulder2: BasePart?
+local NAME_MATCH_DIST_SQ: number = 400
+
+type VMParts = {
+	head      : BasePart?,
+	torso     : BasePart?,
+	arm1      : BasePart?,
+	arm2      : BasePart?,
+	leg1      : BasePart?,
+	leg2      : BasePart?,
+	hip1      : BasePart?,
+	hip2      : BasePart?,
+	shoulder1 : BasePart?,
+	shoulder2 : BasePart?,
 }
 
-export type TrackedModel = {
-    model: Model,
-    parts: BodyParts,
-    isLocal: boolean
+type RealChar = {
+	char   : Model,
+	hrp    : BasePart,
+	hum    : Humanoid,
+	player : Player,
 }
 
-export type DroneData = {
-    part: BasePart,
-    pos: Vector3?,
-    dist: number?
+type Locked = {
+	vm     : Instance,
+	parts  : VMParts,
+	real   : RealChar,
+	player : Player,
+	key    : string,
+	origChar : Model,
 }
 
-export type DroneDrawing = {
-    square: any,
-    text: any
-}
+local realChars   : { [string]: RealChar } = {}
+local locked      : { [Instance]: Locked } = {}
+local localActive : boolean               = false
+local vmOwner     : { [Instance]: Player } = {}
+local boundPlayers: { [Player]: Instance } = {}
+local abandonedVMs: { [Instance]: boolean } = {}
 
----- variables ----
-local LocalPlayer: Player? = Players.LocalPlayer
-local Camera: Camera? = Workspace.CurrentCamera
-
-local TrackedModels: {[number]: TrackedModel} = {}
-local CachedDronePositions: {[number]: DroneData} = {}
-local DroneDrawings: {[number]: DroneDrawing} = {}
-
----- helper functions ----
-
-local function DebugPrint(...: any): ()
-    if DEBUG_MODE then
-        print(StringFormat("[%.2fs]", OsClock()), ...)
-    end
+local function validateParent(inst: Instance?): boolean
+	if inst == nil then return false end
+	local ok, parent = pcall(function(): Instance?
+		return (inst :: Instance).Parent
+	end)
+	return ok and parent ~= nil
 end
 
-local function ValidateParent(instance: Instance?): boolean
-    if not instance then return false end
-    
-    local success: boolean, parent: Instance? = Pcall(function()
-        return instance.Parent
-    end)
-    
-    return success and parent ~= nil
+local function getInstanceDataId(inst: Instance): number?
+	local ok, data = pcall(function(): any
+		return (inst :: any).Data
+	end)
+	if not ok or data == nil then return nil end
+	local id = tonumber(data :: any)
+	return if id ~= nil and id ~= 0 then id else nil
 end
 
-local function SafeFindFirstChild(instance: Instance?, name: string): Instance?
-    if not instance or not ValidateParent(instance) then return nil end
-    
-    local success: boolean, result: Instance? = Pcall(function()
-        return instance:FindFirstChild(name)
-    end)
-    
-    return success and result or nil
+local function getVMParts(vm: Instance): VMParts
+	local out: VMParts = {} :: VMParts
+	for _, n in PART_NAMES do
+		local c: Instance? = nil
+		pcall(function(): ()
+			local found = vm:FindFirstChild(n)
+			if found ~= nil and found:IsA("BasePart") then
+				c = found
+			end
+		end)
+		if c ~= nil then
+			(out :: any)[n] = c :: BasePart
+		end
+	end
+	for _, n in PART_NAMES do
+		if (out :: any)[n] == nil then
+			local fallbacks = FALLBACK_MAP[n]
+			if fallbacks ~= nil then
+				for _, fb in fallbacks do
+					if (out :: any)[fb] ~= nil then
+						(out :: any)[n] = (out :: any)[fb]
+						break
+					end
+				end
+			end
+		end
+	end
+	return out
 end
 
-local function SafeGetChildren(instance: Instance?): {Instance}?
-    if not instance or not ValidateParent(instance) then return nil end
-    
-    local success: boolean, result: {Instance}? = Pcall(function()
-        return instance:GetChildren()
-    end)
-    
-    return success and result or nil
-end
-
-local function SafeFindFirstChildOfClass(instance: Instance?, className: string): Instance?
-    if not instance or not ValidateParent(instance) then return nil end
-    
-    local success: boolean, result: Instance? = Pcall(function()
-        return instance:FindFirstChildOfClass(className)
-    end)
-    
-    return success and result or nil
-end
-
-local function GetInstanceID(instance: Instance?): number?
-    if not instance or not ValidateParent(instance) then return nil end
-    
-    local success: boolean, data: any = Pcall(function()
-        return instance.Data
-    end)
-    
-    if not success or not data then return nil end
-    
-    local id: number? = tonumber(data)
-    return (id and id ~= 0) and id or nil
-end
-
-local function GetInstanceName(instance: Instance?): string?
-    if not instance or not ValidateParent(instance) then return nil end
-    
-    local success: boolean, name: string? = Pcall(function()
-        return instance.Name
-    end)
-    
-    return success and name or nil
-end
-
-local function GetClassName(instance: Instance?): string?
-    if not instance or not ValidateParent(instance) then return nil end
-    
-    local success: boolean, className: string? = Pcall(function()
-        return instance.ClassName
-    end)
-    
-    return success and className or nil
-end
-
-local function HasAnyModelChildren(model: Model): boolean
-    if not ValidateParent(model) then return false end
-    
-    local children: {Instance}? = SafeGetChildren(model)
-    if not children then return false end
-    
-    for i = 1, #children do
-        local child: Instance = children[i]
-        local className: string? = GetClassName(child)
-        if className == "Model" then
-            return true
-        end
-    end
-    
-    return false
-end
-
-local function IsTeammate(model: Model): boolean
-	if not ValidateParent(model) then
+local function isStructurallyValid(vm: Instance): boolean
+	local ok, result = pcall(function(): boolean
+		if vm.ClassName ~= "Model" then return false end
+		for _, c in vm:GetChildren() do
+			if c.ClassName == "Model" then
+				local h = vm:FindFirstChild("head")
+				return h ~= nil and h:IsA("BasePart")
+			end
+		end
 		return false
+	end)
+	return ok and result
+end
+
+local function findPlayerByName(charName: string): Player?
+	local p = Players:FindFirstChild(charName)
+	if p ~= nil and p:IsA("Player") then
+		return p :: Player
+	end
+	return nil
+end
+
+local function isTeammate(p: Player): boolean
+	local lpTeam = LocalPlayer.Team
+	if lpTeam == nil then return false end
+	local pTeam = p.Team
+	if pTeam == nil then return false end
+	if pTeam == lpTeam then return true end
+	return pTeam.Name == lpTeam.Name
+end
+
+local function buildModelData(player: Player, vm: Instance, parts: VMParts, real: RealChar): { [string]: any }
+	local hum = real.hum
+
+	local fullBodyData: { [string]: any } = {
+		Head            = parts.head,
+		Torso           = parts.torso,
+		LeftArm         = parts.arm1,
+		RightArm        = parts.arm2,
+		LeftLeg         = parts.leg1,
+		RightLeg        = parts.leg2,
+		LeftUpperArm    = parts.arm1,
+		LeftLowerArm    = parts.arm1,
+		LeftHand        = parts.arm1,
+		RightUpperArm   = parts.arm2,
+		RightLowerArm   = parts.arm2,
+		RightHand       = parts.arm2,
+		LeftUpperLeg    = parts.leg1,
+		LeftLowerLeg    = parts.leg1,
+		LeftFoot        = parts.leg1,
+		RightUpperLeg   = parts.leg2,
+		RightLowerLeg   = parts.leg2,
+		RightFoot       = parts.leg2,
+		UpperTorso      = parts.torso,
+		LowerTorso      = parts.torso,
+		BodyHeightScale = 1,
+		RigType         = 1,
+	}
+
+	local bodyPartsData: { any } = {
+		{ name = "LowerTorso",    part = parts.torso     },
+		{ name = "LeftUpperLeg",  part = parts.hip1      },
+		{ name = "LeftLowerLeg",  part = parts.leg1      },
+		{ name = "RightUpperLeg", part = parts.hip2      },
+		{ name = "RightLowerLeg", part = parts.leg2      },
+		{ name = "LeftUpperArm",  part = parts.shoulder1 },
+		{ name = "LeftLowerArm",  part = parts.arm1      },
+		{ name = "RightUpperArm", part = parts.shoulder2 },
+		{ name = "RightLowerArm", part = parts.arm2      },
+		{ name = "LeftHand",      part = parts.arm1      },
+		{ name = "RightHand",     part = parts.arm2      },
+	}
+
+	return {
+		Username        = player.Name,
+		Displayname     = player.DisplayName,
+		Userid          = player.UserId,
+		Character       = vm,
+		PrimaryPart     = parts.torso or parts.head,
+		Humanoid        = hum,
+		Head            = parts.head,
+		Torso           = parts.torso,
+		LeftArm         = parts.arm1,
+		RightArm        = parts.arm2,
+		LeftLeg         = parts.leg1,
+		RightLeg        = parts.leg2,
+		BodyHeightScale = 1,
+		RigType         = 1,
+		Whitelisted     = false,
+		Archenemies     = false,
+		Aimbot_Part     = parts.head,
+		Aimbot_TP_Part  = parts.head,
+		Triggerbot_Part = parts.head,
+		Health          = hum.Health,
+		MaxHealth       = hum.MaxHealth,
+		body_parts_data = bodyPartsData,
+		full_body_data  = fullBodyData,
+		Teamname        = if player.Team ~= nil then player.Team.Name else "",
+ 		Toolname = "",
+	}
+end
+
+local function unbind(vm: Instance, entry: Locked): ()
+	_remove_model_data(entry.key)
+	locked[vm] = nil
+	vmOwner[vm] = nil
+	if boundPlayers[entry.player] == vm then
+		boundPlayers[entry.player] = nil
+	end
+end
+
+local function unbindAndAbandon(vm: Instance, entry: Locked): ()
+	abandonedVMs[vm] = true
+	unbind(vm, entry)
+end
+
+local function tryBindVM(vm: Instance): ()
+	if locked[vm] ~= nil then return end
+	if abandonedVMs[vm] then return end
+	if not isStructurallyValid(vm) then return end
+
+	local vmId = getInstanceDataId(vm)
+	if vmId == nil then return end
+
+	local head = vm:FindFirstChild("head") :: BasePart?
+	if head == nil then return end
+
+	local hpos = head.Position
+	local hx   = hpos.X
+	local hy   = hpos.Y
+	local hz   = hpos.Z
+
+	local bestName: string?   = nil
+	local bestReal: RealChar? = nil
+	local bestSq  : number    = NAME_MATCH_DIST_SQ
+	local secondSq: number    = NAME_MATCH_DIST_SQ
+
+	for name, real in realChars do
+		if boundPlayers[real.player] ~= nil then continue end
+		local rp = real.hrp.Position
+		local dx = rp.X - hx
+		local dy = rp.Y - hy
+		local dz = rp.Z - hz
+		local dsq = dx*dx + dy*dy + dz*dz
+		if dsq < bestSq then
+			secondSq = bestSq
+			bestSq   = dsq
+			bestName = name
+			bestReal = real
+		elseif dsq < secondSq then
+			secondSq = dsq
+		end
 	end
 
-	local head: Instance? = model:FindFirstChild("head")
-	if not head then
-		return false
+	if bestName == nil or bestReal == nil then return end
+	if secondSq < bestSq * 4 then return end
+
+	local player = (bestReal :: RealChar).player
+	if player == LocalPlayer then return end
+
+	if _is_team_check() and isTeammate(player) then return end
+
+	local parts = getVMParts(vm)
+	if parts.head == nil and parts.torso == nil then return end
+
+	local key = `vm_{vmId}_{player.UserId}`
+	_add_model_data(buildModelData(player, vm, parts, bestReal :: RealChar), key)
+
+	locked[vm] = {
+		vm       = vm,
+		parts    = parts,
+		real     = bestReal :: RealChar,
+		player   = player,
+		key      = key,
+		origChar = (bestReal :: RealChar).char,
+	}
+	vmOwner[vm] = player
+	boundPlayers[player] = vm
+end
+
+RunService.PreModel:Connect(function(): ()
+	for k in realChars do realChars[k] = nil end
+
+	for vm in abandonedVMs do
+		if not validateParent(vm) then
+			abandonedVMs[vm] = nil
+		end
 	end
 
-	local usernameGui: Instance? = head:FindFirstChild("Username")
-	if usernameGui and GetClassName(usernameGui) == "BillboardGui" then
-		DebugPrint("Model has Username BillboardGui - Teammate detected")
-		return true
+	for _, p in Players:GetChildren() do
+		if not p:IsA("Player") then continue end
+		if p == LocalPlayer then continue end
+		local player = p :: Player
+		local char = player.Character
+		if char == nil then continue end
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if hrp == nil or not hrp:IsA("BasePart") then continue end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum == nil then continue end
+		realChars[player.Name] = {
+			char   = char :: Model,
+			hrp    = hrp :: BasePart,
+			hum    = hum :: Humanoid,
+			player = player,
+		}
 	end
 
-	return false
-end
+	for vm, entry in locked do
+		if not validateParent(vm) then
+			unbind(vm, entry)
+			continue
+		end
 
+		local owner = vmOwner[vm]
+		if owner == nil then
+			unbind(vm, entry)
+			continue
+		end
 
-local function GetBodyParts(model: Model): BodyParts?
-    if not ValidateParent(model) then
-        DebugPrint("GetBodyParts: Invalid model or no parent")
-        return nil
-    end
-    
-    local parts: BodyParts = {}
-    local foundParts: {string} = {}
-    
-    for i = 1, #PART_NAMES do
-        local pname: string = PART_NAMES[i]
-        local part: Instance? = SafeFindFirstChild(model, pname)
-        if part and ValidateParent(part) then
-            (parts :: any)[pname] = part
-            TableInsert(foundParts, pname)
-        end
-    end
-    
-    local modelName: string? = GetInstanceName(model)
-    DebugPrint("GetBodyParts for", modelName or "Unknown", "- Found parts:", TableConcat(foundParts, ", "))
-    
-    for i = 1, #PART_NAMES do
-        local pname: string = PART_NAMES[i]
-        if not (parts :: any)[pname] and FALLBACK_MAP[pname] then
-            for j = 1, #FALLBACK_MAP[pname] do
-                local fallbackName: string = FALLBACK_MAP[pname][j]
-                if (parts :: any)[fallbackName] then
-                    (parts :: any)[pname] = (parts :: any)[fallbackName]
-                    DebugPrint("Applied fallback:", pname, "->", fallbackName)
-                    break
-                end
-            end
-        end
-    end
-    
-    if not parts.head and not parts.torso then
-        DebugPrint("GetBodyParts: Missing critical parts (head/torso)")
-        return nil
-    end
-    
-    return parts
-end
+		local char = owner.Character
+		if char == nil then
+			unbind(vm, entry)
+			continue
+		end
 
-local function BuildModelData(model: Model, parts: BodyParts, uniqueName: string): any
-    local bodyPartsData: {any} = {
-        {name = "LowerTorso", part = parts.torso},
-        {name = "LeftUpperLeg", part = parts.hip1},
-        {name = "LeftLowerLeg", part = parts.leg1},
-        {name = "RightUpperLeg", part = parts.hip2},
-        {name = "RightLowerLeg", part = parts.leg2},
-        {name = "LeftUpperArm", part = parts.shoulder1},
-        {name = "LeftLowerArm", part = parts.arm1},
-        {name = "RightUpperArm", part = parts.shoulder2},
-        {name = "RightLowerArm", part = parts.arm2},
-        {name = "LeftHand", part = parts.arm1},
-        {name = "RightHand", part = parts.arm2}
-    }
-    
-    local fullBodyData: {any} = {}
-    for pname, part in pairs(parts) do
-        local mappedName: string? = FULL_BODY_MAP[pname]
-        if mappedName then
-            TableInsert(fullBodyData, {name = mappedName, part = part})
-        end
-    end
-    
-    return {
-        Username = uniqueName,
-        Displayname = uniqueName,
-        Userid = 0,
-        Character = model,
-        PrimaryPart = parts.torso or parts.head,
-        Head = parts.head,
-        Torso = parts.torso,
-        LeftArm = parts.arm1,
-        RightArm = parts.arm2,
-        LeftLeg = parts.leg1,
-        RightLeg = parts.leg2,
-        LeftUpperArm = parts.arm1,
-        LeftLowerArm = parts.arm1,
-        LeftHand = parts.arm1,
-        RightUpperArm = parts.arm2,
-        RightLowerArm = parts.arm2,
-        RightHand = parts.arm2,
-        LeftUpperLeg = parts.leg1,
-        LeftLowerLeg = parts.leg1,
-        LeftFoot = parts.leg1,
-        RightUpperLeg = parts.leg2,
-        RightLowerLeg = parts.leg2,
-        RightFoot = parts.leg2,
-        UpperTorso = parts.torso,
-        LowerTorso = parts.torso,
-        BodyHeightScale = 1,
-        RigType = 1,
-        Whitelisted = false,
-        Archenemies = false,
-        Aimbot_Part = parts.head,
-        Aimbot_TP_Part = parts.head,
-        Triggerbot_Part = parts.head,
-        Health = 100,
-        MaxHealth = 100,
-        body_parts_data = bodyPartsData,
-        full_body_data = fullBodyData,
-        Teamname = "non",
-        Toolname = "Non"
-    }
-end
+		if char ~= entry.origChar then
+			unbindAndAbandon(vm, entry)
+			continue
+		end
 
-local function BuildLocalData(model: Model, parts: BodyParts, uniqueName: string): any
-    return {
-        LocalPlayer = model,
-        Displayname = uniqueName,
-        Username = uniqueName,
-        Userid = LocalPlayer and LocalPlayer.UserId or 1,
-        Character = model,
-        Team = nil,
-        RootPart = parts.torso or parts.head,
-        LeftFoot = parts.leg1,
-        Head = parts.head,
-        LowerTorso = parts.torso,
-        Tool = nil,
-        Humanoid = parts.head,
-        Health = 100,
-        MaxHealth = 100,
-        RigType = 1,
-        Toolname = "none",
-        Teamname = "none"
-    }
-end
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if hrp == nil or not hrp:IsA("BasePart") then
+			unbind(vm, entry)
+			continue
+		end
 
-local function GetDronePart(drone: Model): BasePart?
-    if not drone or not ValidateParent(drone) then return nil end
-    
-    local success: boolean, primaryPart: BasePart? = Pcall(function()
-        return drone.PrimaryPart
-    end)
-    
-    if success and primaryPart and ValidateParent(primaryPart) then
-        return primaryPart
-    end
-    
-    local part: Instance? = SafeFindFirstChild(drone, "PrimaryPart")
-    if part and ValidateParent(part) then
-        return part :: BasePart
-    end
-    
-    part = SafeFindFirstChildOfClass(drone, "BasePart")
-    if part and ValidateParent(part) then
-        return part :: BasePart
-    end
-    
-    return nil
-end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum == nil then
+			unbind(vm, entry)
+			continue
+		end
 
----- runtime ----
+		if hum.Health <= 0 then
+			unbind(vm, entry)
+			continue
+		end
 
-RunService.PostLocal:Connect(function()
-    local viewmodels: Instance? = SafeFindFirstChild(Workspace, "Viewmodels")
-    
-    if viewmodels and ValidateParent(viewmodels) then
-        local currentModels: {[number]: Model} = {}
-        local children: {Instance}? = SafeGetChildren(viewmodels)
-        
-        if not children then
-            DebugPrint("Failed to get Viewmodels children")
-            return
-        end
-        
-        DebugPrint("Scanning Viewmodels folder - Found", #children, "children")
-        
-        for i = 1, #children do
-            local model: Instance = children[i]
-            local className: string? = GetClassName(model)
-            local modelName: string? = GetInstanceName(model)
-            
-            DebugPrint("Child:", modelName or "Unknown", "ClassName:", className or "Unknown")
-            
-            if className ~= "Model" then
-                DebugPrint("Skipping - not a Model")
-                continue
-            end
-            
-            if not ValidateParent(model) then
-                DebugPrint("Skipping - no parent")
-                continue
-            end
-            
-            if not HasAnyModelChildren(model :: Model) then
-                DebugPrint("Skipping - no Model children (empty container)")
-                continue
-            end
-            
-            if SafeFindFirstChild(model, "TeamHighlight") then
-                DebugPrint("Skipping - has TeamHighlight")
-                continue
-            end
-            
-            if IsTeammate(model :: Model) then
-                DebugPrint("Skipping - teammate")
-                continue
-            end
-            
-            local id: number? = GetInstanceID(model)
-            if not id then
-                DebugPrint("Skipping - invalid Data ID")
-                continue
-            end
-            
-            local uniqueName: string = tostring(id)
-            DebugPrint("Valid model found:", modelName or "Unknown", "ID:", id, "Unique Name:", uniqueName)
-            currentModels[id] = model :: Model
-            
-            if not TrackedModels[id] then
-                DebugPrint("New model detected:", modelName or "Unknown", "with unique ID:", uniqueName)
-                
-                local parts: BodyParts? = GetBodyParts(model :: Model)
-                if parts then
-                    local isLocal: boolean = modelName == "LocalViewModel"
-                    
-                    if isLocal then
-                        DebugPrint("Detected LocalViewModel - Setting as local player with unique name:", uniqueName)
-                        local localData: any = BuildLocalData(model :: Model, parts, uniqueName)
-                        local success: boolean, err: string? = Pcall(function()
-                            override_local_data(localData)
-                        end)
-                        
-                        if success then
-                            DebugPrint("Successfully set local player data")
-                            TrackedModels[id] = {model = model :: Model, parts = parts, isLocal = true}
-                        else
-                            DebugPrint("Error setting local data:", err or "Unknown error")
-                        end
-                    else
-                        DebugPrint("Adding enemy model:", modelName or "Unknown", "with unique name:", uniqueName)
-                        local modelData: any = BuildModelData(model :: Model, parts, uniqueName)
-                        local success: boolean, err: string? = Pcall(function()
-                            add_model_data(modelData, uniqueName)
-                        end)
-                        
-                        if success then
-                            DebugPrint("Successfully added model data with key:", uniqueName)
-                            TrackedModels[id] = {model = model :: Model, parts = parts, isLocal = false}
-                        else
-                            DebugPrint("Error adding model data:", err or "Unknown error")
-                        end
-                    end
-                else
-                    DebugPrint("Failed to get body parts for:", modelName or "Unknown")
-                end
-            end
-        end
-        
-        for id, data in pairs(TrackedModels) do
-            if not currentModels[id] or not ValidateParent(data.model) then
-                local uniqueName: string = tostring(id)
-                DebugPrint("Removing model ID:", id, "Unique Name:", uniqueName)
-                
-                if not data.isLocal then
-                    local success: boolean, err: string? = Pcall(function()
-                        remove_model_data(uniqueName)
-                    end)
-                    if not success then
-                        DebugPrint("Error removing model data:", err or "Unknown error")
-                    end
-                else
-                    local success: boolean, err: string? = Pcall(function()
-                        clear_local_data()
-                    end)
-                    if not success then
-                        DebugPrint("Error clearing local data:", err or "Unknown error")
-                    end
-                end
-                TrackedModels[id] = nil
-            end
-        end
-    else
-        DebugPrint("Viewmodels folder not found!")
-        if next(TrackedModels) then
-            DebugPrint("Clearing all model data")
-            Pcall(clear_model_data)
-            Pcall(clear_local_data)
-            TableClear(TrackedModels)
-        end
-    end
-    
-    local currentDrones: {[number]: Model} = {}
-    local wsChildren: {Instance}? = SafeGetChildren(Workspace)
-    
-    if wsChildren then
-        for i = 1, #wsChildren do
-            local child: Instance = wsChildren[i]
-            local childName: string? = GetInstanceName(child)
-            local className: string? = GetClassName(child)
-            
-            if childName == "Drone" and className == "Model" and ValidateParent(child) then
-                local id: number? = GetInstanceID(child)
-                if id then
-                    currentDrones[id] = child :: Model
-                    
-                    if not CachedDronePositions[id] then
-                        local part: BasePart? = GetDronePart(child :: Model)
-                        if part then
-                            DebugPrint("New drone detected - ID:", id)
-                            CachedDronePositions[id] = {part = part}
-                        end
-                    end
-                end
-            end
-        end
-    end
-    
-    for id in pairs(CachedDronePositions) do
-        if not currentDrones[id] then
-            DebugPrint("Removing drone - ID:", id)
-            CachedDronePositions[id] = nil
-            if DroneDrawings[id] then
-                Pcall(function()
-                    DroneDrawings[id].square:Remove()
-                    DroneDrawings[id].text:Remove()
-                end)
-                DroneDrawings[id] = nil
-            end
-        end
-    end
-    
-    local character: Model? = LocalPlayer and LocalPlayer.Character or nil
-    local playerPos: Vector3? = nil
-    
-    if character and ValidateParent(character) then
-        local head: Instance? = SafeFindFirstChild(character, "Head")
-        if head and ValidateParent(head) then
-            local success: boolean, pos: Vector3? = Pcall(function()
-                return (head :: BasePart).Position
-            end)
-            if success and pos then
-                playerPos = pos
-            end
-        end
-    end
-    
-    for id, data in pairs(CachedDronePositions) do
-        if data.part and ValidateParent(data.part) then
-            local success: boolean, pos: Vector3? = Pcall(function()
-                return data.part.Position
-            end)
-            
-            if success and pos then
-                data.pos = pos
-                
-                if playerPos then
-                    local dx: number = pos.X - playerPos.X
-                    local dy: number = pos.Y - playerPos.Y
-                    local dz: number = pos.Z - playerPos.Z
-                    data.dist = MathSqrt(dx*dx + dy*dy + dz*dz)
-                end
-            end
-        else
-            CachedDronePositions[id] = nil
-        end
-    end
+		entry.real = {
+			char   = char :: Model,
+			hrp    = hrp :: BasePart,
+			hum    = hum :: Humanoid,
+			player = owner,
+		}
+	end
+
+	local vmFolder = Workspace:FindFirstChild("Viewmodels")
+	if vmFolder == nil then return end
+
+	for _, vm in vmFolder:GetChildren() do
+		if vm.Name == "LocalViewmodel" then continue end
+		if locked[vm] ~= nil then continue end
+		if abandonedVMs[vm] then continue end
+		tryBindVM(vm)
+	end
 end)
 
-RunService.Render:Connect(function()
-    if not Camera or not ValidateParent(Camera) then
-        Camera = Workspace.CurrentCamera
-        return
-    end
-    
-    for id, data in pairs(CachedDronePositions) do
-        if data.pos then
-            local success: boolean, screen: Vector3?, onScreen: boolean? = Pcall(function()
-                local s, visible = (Camera :: Camera):WorldToScreenPoint(data.pos :: Vector3)
-                return s, visible
-            end)
-            
-            if success and screen and onScreen then
-                if not DroneDrawings[id] then
-                    local drawSuccess: boolean = Pcall(function()
-                        local square = Drawing.new("Square")
-                        square.Thickness = 2
-                        square.Filled = false
-                        square.Color = Color3.fromRGB(255, 0, 0)
-                        square.ZIndex = 1000
-                        
-                        local text = Drawing.new("Text")
-                        text.Size = 14
-                        text.Center = true
-                        text.Outline = true
-                        text.OutlineColor = Color3.fromRGB(0, 0, 0)
-                        text.Color = Color3.fromRGB(255, 255, 255)
-                        text.Font = 2
-                        text.ZIndex = 1001
-                        
-                        DroneDrawings[id] = {square = square, text = text}
-                    end)
-                    
-                    if not drawSuccess then
-                        continue
-                    end
-                end
-                
-                local cameraPos: Vector3? = nil
-                local camSuccess: boolean = Pcall(function()
-                    cameraPos = (Camera :: Camera).CFrame.Position
-                end)
-                
-                if camSuccess and cameraPos and data.pos then
-                    local distance: number = VectorMagnitude(VectorCreate(
-                        data.pos.X - cameraPos.X,
-                        data.pos.Y - cameraPos.Y,
-                        data.pos.Z - cameraPos.Z
-                    ))
-                    local size: number = MathClamp(DRONE_SIZE_DIVISOR / distance, DRONE_SIZE_MIN, DRONE_SIZE_MAX)
-                    
-                    Pcall(function()
-                        local drawings: DroneDrawing = DroneDrawings[id]
-                        drawings.square.Position = Vector2.new(screen.X - size/2, screen.Y - size/2)
-                        drawings.square.Size = Vector2.new(size, size)
-                        drawings.square.Visible = true
-                        
-                        if data.dist then
-                            drawings.text.Text = "DRONE [" .. MathFloor(data.dist) .. "m]"
-                        else
-                            drawings.text.Text = "DRONE"
-                        end
-                        drawings.text.Position = Vector2.new(screen.X, screen.Y - size/2 - 20)
-                        drawings.text.Visible = true
-                    end)
-                end
-            else
-                if DroneDrawings[id] then
-                    Pcall(function()
-                        DroneDrawings[id].square.Visible = false
-                        DroneDrawings[id].text.Visible = false
-                    end)
-                end
-            end
-        end
-    end
+RunService.PostLocal:Connect(function(): ()
+	local vmFolder = Workspace:FindFirstChild("Viewmodels")
+	local localVm  = if vmFolder ~= nil then vmFolder:FindFirstChild("LocalViewmodel") else nil
+
+	if localVm ~= nil then
+		local parts = getVMParts(localVm)
+		local char  = LocalPlayer.Character
+		local hum: Humanoid? = nil
+		if char ~= nil then
+			local h = char:FindFirstChildOfClass("Humanoid")
+			if h ~= nil then hum = h end
+		end
+
+		local rootPart: BasePart? = parts.torso
+		if rootPart == nil then rootPart = parts.head end
+
+		_override_local({
+			LocalPlayer = LocalPlayer,
+			Displayname = LocalPlayer.DisplayName,
+			Username    = LocalPlayer.Name,
+			Userid      = LocalPlayer.UserId,
+			Character   = char,
+			Team        = LocalPlayer.Team,
+			RootPart    = rootPart,
+			Head        = parts.head,
+			LowerTorso  = parts.torso,
+			LeftFoot    = parts.leg1,
+			Humanoid    = hum,
+			Health      = if hum ~= nil then hum.Health else nil,
+			MaxHealth   = if hum ~= nil then hum.MaxHealth else nil,
+			RigType     = 1,
+		})
+		localActive = true
+	else
+		if localActive then
+			_clear_local_data()
+			localActive = false
+		end
+	end
+
+	local teamCheck = _is_team_check()
+
+	for vm, entry in locked do
+		if not validateParent(vm) then
+			unbind(vm, entry)
+			continue
+		end
+
+		local owner = vmOwner[vm]
+		if owner == nil then
+			unbind(vm, entry)
+			continue
+		end
+
+		if teamCheck and isTeammate(owner) then
+			unbind(vm, entry)
+			continue
+		end
+
+		local char = owner.Character
+		if char == nil then
+			unbindAndAbandon(vm, entry)
+			continue
+		end
+
+		if char ~= entry.origChar then
+			unbindAndAbandon(vm, entry)
+			continue
+		end
+
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if hrp == nil or not hrp:IsA("BasePart") then
+			unbindAndAbandon(vm, entry)
+			continue
+		end
+
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum == nil then
+			unbindAndAbandon(vm, entry)
+			continue
+		end
+
+		local health = hum.Health
+		if health <= 0 then
+			unbindAndAbandon(vm, entry)
+			continue
+		end
+
+		entry.real = {
+			char   = char :: Model,
+			hrp    = hrp :: BasePart,
+			hum    = hum :: Humanoid,
+			player = owner,
+		}
+
+		_edit_model_data({
+			Humanoid    = hum,
+			Health      = health,
+			MaxHealth   = hum.MaxHealth,
+			Whitelisted = false,
+		}, entry.key)
+	end
 end)
 
----- exports ----
+local gadgetConfigs: { [string]: any } = {
+	Gadgets = {
+		Enabled          = true,
+		DrawMode         = 1,
+		BoxColor         = Color3.fromRGB(255, 80, 80),
+		TextColor        = Color3.fromRGB(255, 255, 255),
+		MaxDistance      = 1500,
+		FontSize         = 13,
+		Box              = false,
+		Name             = true,
+		Distance         = true,
+		Folder           = Workspace,
+		CustomName       = "",
+		UseCustomName    = false,
+		MultiSameObject  = true,
+		IncludeOnly      = {
+			"RemoteC4",
+			"Drone",
+			"Claymore",
+			"ProximityAlarm",
+			"ToxicCharge",
+			"DeployableShield",
+			"BarbedWire",
+			"BulletproofCamera",
+			"StickyCamera",
+			"SignalDisruptor",
+		},
+		ExcludeObject    = nil,
+		IncludeAttributes = nil,
+		ExcludeAttributes = nil,
+		Highlight        = true,
+		Fill             = true,
+		Outline          = true,
+		FillTransp       = 0.25,
+		FillColor        = Color3.fromRGB(255, 80, 80),
+		OutlineColor     = Color3.fromRGB(255, 255, 0),
+		OutlineThickness = 1,
+		HighlightStagger = nil,
+	},
+}
 
-_G.cleanup_esp = function()
-    DebugPrint("Running cleanup...")
-    Pcall(function()
-        Drawing.clear()
-    end)
-    TableClear(TrackedModels)
-    TableClear(CachedDronePositions)
-    TableClear(DroneDrawings)
-    Pcall(clear_model_data)
-    Pcall(clear_local_data)
-    DebugPrint("Cleanup complete")
-end
-
-DebugPrint("Script initialized - Debug mode enabled")
+init(gadgetConfigs)
