@@ -7,6 +7,8 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
+type Init = (configs: { [string]: any }) -> ()
+local init: Init = loadstring(game:HttpGet("https://raw.githubusercontent.com/Sploiter13/severe/refs/heads/main/esplib.luau"))()
 
 local _override_local    = override_local_data
 local _add_model_data    = add_model_data
@@ -488,3 +490,5 @@ RunService.PostLocal:Connect(function(): ()
 	end
 end)
 
+local configs: { [string]: any } = {}
+init(configs)
