@@ -7,8 +7,6 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
-type Init = (configs: { [string]: any }) -> ()
-local init: Init = (loadfile("esplib.lua") :: any)()
 
 local _override_local    = override_local_data
 local _add_model_data    = add_model_data
@@ -490,5 +488,3 @@ RunService.PostLocal:Connect(function(): ()
 	end
 end)
 
-local configs: { [string]: any } = {}
-init(configs)
