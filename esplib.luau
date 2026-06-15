@@ -556,10 +556,30 @@ local function remove_dynamic_entry(i: number): ()
 end
 
 local function scan(): ()
+    local folder_children: { [Instance]: { Instance } } = {}
+    local live_ids: { [number]: boolean } = {}
+    for _, config in CONFIGS do
+        if not config.Enabled or config.Folder == nil then continue end
+        local folder = config.Folder :: Instance
+        if folder_children[folder] ~= nil then continue end
+        local ok, ch = pcall(_inst_children, folder)
+        local list: { Instance } = if ok and ch ~= nil then ch :: { Instance } else {}
+        folder_children[folder] = list
+        for _, child in list do
+            local id = getDataId(child)
+            if id ~= nil then live_ids[id] = true end
+        end
+    end
+
+    local function gone(inst_id: number, part: BasePart, inst: Instance, cfg: ConfigEntry): boolean
+        if cfg.Folder ~= nil and not live_ids[inst_id] then return true end
+        return not validateParent(part) or not validateParent(inst)
+    end
+
     local i = 1
     while i <= #static_entries do
         local e = static_entries[i]
-        if not validateParent(e.part) or not validateParent(e.inst) then
+        if gone(e.inst_id, e.part, e.inst, e.config) then
             remove_static_entry(i)
         else
             i += 1
@@ -569,7 +589,7 @@ local function scan(): ()
     i = 1
     while i <= #immediate_entries do
         local e = immediate_entries[i]
-        if not validateParent(e.part) or not validateParent(e.inst) then
+        if gone(e.inst_id, e.part, e.inst, e.config) then
             remove_immediate_entry(i)
         else
             i += 1
@@ -579,7 +599,7 @@ local function scan(): ()
     i = 1
     while i <= #dynamic_entries do
         local e = dynamic_entries[i]
-        if not validateParent(e.part) or not validateParent(e.inst) then
+        if gone(e.inst_id, e.part, e.inst, e.config) then
             remove_dynamic_entry(i)
         else
             i += 1
@@ -589,8 +609,10 @@ local function scan(): ()
     for _, config in CONFIGS do
         if not config.Enabled then continue end
 
-        if config.Folder ~= nil and validateParent(config.Folder) then
-            for _, child in config.Folder:GetChildren() do
+        if config.Folder ~= nil then
+            local children = folder_children[config.Folder :: Instance]
+            if children == nil then continue end
+            for _, child in children do
                 local childId = getDataId(child)
                 if childId == nil or known_children[childId] ~= nil then continue end
                 if should_draw(child, config) then
@@ -604,10 +626,8 @@ local function scan(): ()
         elseif config.Object ~= nil then
             local meta = obj_meta[config]
             if meta == nil then continue end
-
             local parent = meta.parent
             if not validateParent(parent) then continue end
-
             if config.MultiSameObject == true then
                 for _, child in (parent :: Instance):GetChildren() do
                     if child.Name == meta.name then
