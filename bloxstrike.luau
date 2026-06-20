@@ -212,30 +212,28 @@ local function buildModelData(player: Player, char: Model, hum: Humanoid, parts:
 	local rightLowerLeg  = parts.rightLowerLeg
 	local rightFoot      = parts.rightFoot
 
-	local fullBodyData: { [string]: any } = {
-		BodyHeightScale = 1,
-		RigType         = 1,
-	}
-	setUd(fullBodyData, "Head",          head)
-	setUd(fullBodyData, "Torso",         lowerTorso)
-	setUd(fullBodyData, "LeftArm",       leftLowerArm)
-	setUd(fullBodyData, "RightArm",      rightLowerArm)
-	setUd(fullBodyData, "LeftLeg",       leftLowerLeg)
-	setUd(fullBodyData, "RightLeg",      rightLowerLeg)
-	setUd(fullBodyData, "LeftUpperArm",  leftUpperArm)
-	setUd(fullBodyData, "LeftLowerArm",  leftLowerArm)
-	setUd(fullBodyData, "LeftHand",      leftHand)
-	setUd(fullBodyData, "RightUpperArm", rightUpperArm)
-	setUd(fullBodyData, "RightLowerArm", rightLowerArm)
-	setUd(fullBodyData, "RightHand",     rightHand)
-	setUd(fullBodyData, "LeftUpperLeg",  leftUpperLeg)
-	setUd(fullBodyData, "LeftLowerLeg",  leftLowerLeg)
-	setUd(fullBodyData, "LeftFoot",      leftFoot)
-	setUd(fullBodyData, "RightUpperLeg", rightUpperLeg)
-	setUd(fullBodyData, "RightLowerLeg", rightLowerLeg)
-	setUd(fullBodyData, "RightFoot",     rightFoot)
-	setUd(fullBodyData, "UpperTorso",    upperTorso)
-	setUd(fullBodyData, "LowerTorso",    lowerTorso)
+	local fullBodyData: { any } = {}
+local function addFBD(name: string, part: BasePart?): ()
+	if part ~= nil then
+		fullBodyData[#fullBodyData + 1] = { name = name, part = part }
+	end
+end
+addFBD("Head",            head)
+addFBD("UpperTorso",      upperTorso)
+addFBD("LowerTorso",      lowerTorso)
+addFBD("HumanoidRootPart", hrp)
+addFBD("LeftUpperArm",    leftUpperArm)
+addFBD("LeftLowerArm",    leftLowerArm)
+addFBD("LeftHand",        leftHand)
+addFBD("RightUpperArm",   rightUpperArm)
+addFBD("RightLowerArm",   rightLowerArm)
+addFBD("RightHand",       rightHand)
+addFBD("LeftUpperLeg",    leftUpperLeg)
+addFBD("LeftLowerLeg",    leftLowerLeg)
+addFBD("LeftFoot",        leftFoot)
+addFBD("RightUpperLeg",   rightUpperLeg)
+addFBD("RightLowerLeg",   rightLowerLeg)
+addFBD("RightFoot",       rightFoot)
 
 	local bodyPartsData: { any } = {
 		{ name = "LowerTorso",    part = lowerTorso    },
