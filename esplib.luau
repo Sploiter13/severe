@@ -500,7 +500,18 @@ local function make_dynamic_entry(inst: Instance, part: BasePart, parts: { BaseP
 end
 
 local function make_entry(inst: Instance, part: BasePart, parts: { BasePart }, config: ConfigEntry, display: string): ()
-    if not part:IsA("BasePart") then return end
+    if not part:IsA("BasePart") then
+        local fallback: BasePart? = nil
+        for _, p in parts do
+            if p:IsA("BasePart") then
+                fallback = p
+                break
+            end
+        end
+        if fallback == nil then return end  
+        part = fallback
+    end
+
     local partId = getDataId(part)
     local instId = getDataId(inst)
     if partId == nil or instId == nil then return end
